@@ -598,7 +598,7 @@ impl Command {
                 "context" => {
                     if parts.len() < 2 {
                         return Ok(Self::Context {
-                            subcommand: ContextSubcommand::Help,
+                            subcommand: ContextSubcommand::Show { expand: false },
                         });
                     }
 
@@ -1062,6 +1062,110 @@ pub struct CommandDescription {
 }
 
 impl Command {
+    /// Get all subcommand handlers for a given command type
+    pub fn get_subcommand_handlers(command_type: &str) -> Vec<(&'static str, &'static dyn CommandHandler)> {
+        // Check if this is a nested subcommand request (e.g., "context hooks")
+        if let Some((parent, child)) = command_type.split_once(' ') {
+            match (parent, child) {
+                ("context", "hooks") => {
+                    use crate::cli::chat::commands::context::hooks_add::ADD_HOOKS_HANDLER;
+                    use crate::cli::chat::commands::context::hooks_disable::DISABLE_HOOKS_HANDLER;
+                    use crate::cli::chat::commands::context::hooks_disable_all::DISABLE_ALL_HOOKS_HANDLER;
+                    use crate::cli::chat::commands::context::hooks_enable::ENABLE_HOOKS_HANDLER;
+                    use crate::cli::chat::commands::context::hooks_enable_all::ENABLE_ALL_HOOKS_HANDLER;
+                    use crate::cli::chat::commands::context::hooks_help::HOOKS_HELP_HANDLER;
+                    use crate::cli::chat::commands::context::hooks_remove::REMOVE_HOOKS_HANDLER;
+
+                    return vec![
+                        ("add", &ADD_HOOKS_HANDLER as &dyn CommandHandler),
+                        ("rm", &REMOVE_HOOKS_HANDLER as &dyn CommandHandler),
+                        ("enable", &ENABLE_HOOKS_HANDLER as &dyn CommandHandler),
+                        ("disable", &DISABLE_HOOKS_HANDLER as &dyn CommandHandler),
+                        ("enable-all", &ENABLE_ALL_HOOKS_HANDLER as &dyn CommandHandler),
+                        ("disable-all", &DISABLE_ALL_HOOKS_HANDLER as &dyn CommandHandler),
+                        ("help", &HOOKS_HELP_HANDLER as &dyn CommandHandler),
+                    ];
+                }
+                // Add other nested subcommands here if needed
+                _ => return Vec::new(),
+            }
+        }
+
+        // Handle top-level commands
+        match command_type {
+            "profile" => {
+                use crate::cli::chat::commands::profile::{
+                    CREATE_PROFILE_HANDLER,
+                    DELETE_PROFILE_HANDLER,
+                    HELP_PROFILE_HANDLER,
+                    LIST_PROFILE_HANDLER,
+                    RENAME_PROFILE_HANDLER,
+                    SET_PROFILE_HANDLER,
+                };
+
+                vec![
+                    ("list", &LIST_PROFILE_HANDLER as &dyn CommandHandler),
+                    ("create", &CREATE_PROFILE_HANDLER as &dyn CommandHandler),
+                    ("delete", &DELETE_PROFILE_HANDLER as &dyn CommandHandler),
+                    ("set", &SET_PROFILE_HANDLER as &dyn CommandHandler),
+                    ("rename", &RENAME_PROFILE_HANDLER as &dyn CommandHandler),
+                    ("help", &HELP_PROFILE_HANDLER as &dyn CommandHandler),
+                ]
+            },
+            "context" => {
+                use crate::cli::chat::commands::context::CONTEXT_HANDLER;
+                use crate::cli::chat::commands::context::add::ADD_CONTEXT_HANDLER;
+                use crate::cli::chat::commands::context::clear::CLEAR_CONTEXT_HANDLER;
+                use crate::cli::chat::commands::context::remove::REMOVE_CONTEXT_HANDLER;
+                use crate::cli::chat::commands::context::show::SHOW_CONTEXT_HANDLER;
+
+                vec![
+                    ("add", &ADD_CONTEXT_HANDLER as &dyn CommandHandler),
+                    ("rm", &REMOVE_CONTEXT_HANDLER as &dyn CommandHandler),
+                    ("clear", &CLEAR_CONTEXT_HANDLER as &dyn CommandHandler),
+                    ("show", &SHOW_CONTEXT_HANDLER as &dyn CommandHandler),
+                    ("hooks", &CONTEXT_HANDLER as &dyn CommandHandler),
+                    ("help", &CONTEXT_HANDLER as &dyn CommandHandler),
+                ]
+            },
+            "tools" => {
+                use crate::cli::chat::commands::tools::{
+                    HELP_TOOLS_HANDLER,
+                    LIST_TOOLS_HANDLER,
+                    RESET_SINGLE_TOOL_HANDLER,
+                    RESET_TOOLS_HANDLER,
+                    TRUST_TOOLS_HANDLER,
+                    TRUSTALL_TOOLS_HANDLER,
+                    UNTRUST_TOOLS_HANDLER,
+                };
+
+                vec![
+                    ("list", &LIST_TOOLS_HANDLER as &dyn CommandHandler),
+                    ("trust", &TRUST_TOOLS_HANDLER as &dyn CommandHandler),
+                    ("untrust", &UNTRUST_TOOLS_HANDLER as &dyn CommandHandler),
+                    ("trustall", &TRUSTALL_TOOLS_HANDLER as &dyn CommandHandler),
+                    ("reset", &RESET_TOOLS_HANDLER as &dyn CommandHandler),
+                    ("reset_single", &RESET_SINGLE_TOOL_HANDLER as &dyn CommandHandler),
+                    ("help", &HELP_TOOLS_HANDLER as &dyn CommandHandler),
+                ]
+            },
+            "prompts" => {
+                use crate::cli::chat::commands::prompts::{
+                    GET_PROMPTS_HANDLER,
+                    HELP_PROMPTS_HANDLER,
+                    LIST_PROMPTS_HANDLER,
+                };
+
+                vec![
+                    ("list", &LIST_PROMPTS_HANDLER as &dyn CommandHandler),
+                    ("get", &GET_PROMPTS_HANDLER as &dyn CommandHandler),
+                    ("help", &HELP_PROMPTS_HANDLER as &dyn CommandHandler),
+                ]
+            },
+            _ => Vec::new(), // Commands without subcommands return an empty vector
+        }
+    }
+
     /// Get the appropriate handler for this command variant
     pub fn to_handler(&self) -> &'static dyn CommandHandler {
         match self {
@@ -1197,5 +1301,162 @@ impl Command {
         }
 
         descriptions
+    }
+
+    /// Get completion suggestions for a command
+    ///
+    /// This method provides context-aware tab completions for commands and their arguments.
+    /// It uses the command handlers' complete_arguments methods to get suggestions.
+    /// When a completion cache is available, it uses fuzzy matching for more intelligent
+    /// suggestions.
+    ///
+    /// # Arguments
+    ///
+    /// * `partial_command` - The partial command string to complete
+    /// * `completion_ctx` - Optional completion context adapter for context-aware completions
+    ///
+    /// # Returns
+    ///
+    /// * `Vec<String>` - A list of completion suggestions
+    pub fn get_completion_suggestions(
+        partial_command: &str,
+        completion_ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        // If it's just a slash, suggest all top-level commands
+        if partial_command == "/" {
+            return Self::all_commands()
+                .into_iter()
+                .map(|(name, _)| format!("/{}", name))
+                .collect();
+        }
+
+        // If it's a partial top-level command (e.g., "/pro")
+        if !partial_command.contains(' ') {
+            let prefix = partial_command.strip_prefix('/').unwrap_or("");
+
+            // If we have a completion cache, use fuzzy matching for better suggestions
+            if let Some(ctx) = completion_ctx {
+                // Store top-level commands in the cache if they're not already there
+                if !ctx.completion_cache.has_category("commands") {
+                    let commands: Vec<String> = Self::all_commands()
+                        .into_iter()
+                        .map(|(name, _)| name.to_string())
+                        .collect();
+                    ctx.completion_cache.update("commands", "top_level", commands);
+                }
+
+                // Use fuzzy matching to find the best matches
+                return ctx
+                    .completion_cache
+                    .get_best_matches("commands", "top_level", prefix, 10)
+                    .into_iter()
+                    .map(|name| format!("/{}", name))
+                    .collect();
+            }
+
+            // Fallback to simple prefix matching if no cache is available
+            return Self::all_commands()
+                .into_iter()
+                .filter(|(name, _)| name.starts_with(prefix))
+                .map(|(name, _)| format!("/{}", name))
+                .collect();
+        }
+
+        // If it's a command followed by a space (e.g., "/profile ")
+        let parts: Vec<&str> = partial_command.split_whitespace().collect();
+        if !parts.is_empty() && parts[0].starts_with('/') {
+            let command = parts[0].strip_prefix('/').unwrap_or("");
+
+            // If we're at the position to complete a subcommand
+            if parts.len() == 1 || (parts.len() == 2 && partial_command.ends_with(' ')) {
+                // If we have a completion cache, ensure subcommands are cached
+                if let Some(ctx) = completion_ctx {
+                    let subcommand_key = format!("{}_subcommands", command);
+
+                    // Store subcommands in the cache if they're not already there
+                    if !ctx.completion_cache.has_key("commands", &subcommand_key) {
+                        let subcommands: Vec<String> = Self::get_subcommand_handlers(command)
+                            .into_iter()
+                            .map(|(name, _)| name.to_string())
+                            .collect();
+                        ctx.completion_cache.update("commands", &subcommand_key, subcommands);
+                    }
+
+                    // Return all subcommands from the cache
+                    return ctx
+                        .completion_cache
+                        .get("commands", &subcommand_key)
+                        .into_iter()
+                        .map(|name| format!("/{} {}", command, name))
+                        .collect();
+                }
+
+                // Fallback to direct subcommand list if no cache is available
+                return Self::get_subcommand_handlers(command)
+                    .into_iter()
+                    .map(|(name, _)| format!("/{} {}", command, name))
+                    .collect();
+            }
+
+            // If we've started typing a subcommand (e.g., "/profile se")
+            if parts.len() == 2 {
+                let subcommand_prefix = parts[1];
+
+                // If we have a completion cache, use fuzzy matching for better suggestions
+                if let Some(ctx) = completion_ctx {
+                    let subcommand_key = format!("{}_subcommands", command);
+
+                    // Store subcommands in the cache if they're not already there
+                    if !ctx.completion_cache.has_key("commands", &subcommand_key) {
+                        let subcommands: Vec<String> = Self::get_subcommand_handlers(command)
+                            .into_iter()
+                            .map(|(name, _)| name.to_string())
+                            .collect();
+                        ctx.completion_cache.update("commands", &subcommand_key, subcommands);
+                    }
+
+                    // Use fuzzy matching to find the best matches
+                    return ctx
+                        .completion_cache
+                        .get_best_matches("commands", &subcommand_key, subcommand_prefix, 10)
+                        .into_iter()
+                        .map(|name| format!("/{} {}", command, name))
+                        .collect();
+                }
+
+                // Fallback to simple prefix matching if no cache is available
+                return Self::get_subcommand_handlers(command)
+                    .into_iter()
+                    .filter(|(name, _)| name.starts_with(subcommand_prefix))
+                    .map(|(name, _)| format!("/{} {}", command, name))
+                    .collect();
+            }
+
+            // If we have a command and subcommand, delegate to the handler
+            if parts.len() >= 2 {
+                let subcommand = parts[1];
+
+                // Try to get the handler for this command/subcommand
+                if let Ok(cmd) = Self::parse(&format!("/{} {}", command, subcommand)) {
+                    // Get the handler
+                    let handler = cmd.to_handler();
+
+                    // Get the remaining args
+                    let remaining_args: Vec<&str> = parts[2..].to_vec();
+
+                    // Get completions from the handler
+                    let completions = handler.complete_arguments(&remaining_args, completion_ctx);
+
+                    // Format the completions
+                    return completions
+                        .into_iter()
+                        .map(|completion| format!("/{} {} {}", command, subcommand, completion))
+                        .collect();
+                }
+            }
+        }
+
+        // No suggestions
+        Vec::new()
     }
 }

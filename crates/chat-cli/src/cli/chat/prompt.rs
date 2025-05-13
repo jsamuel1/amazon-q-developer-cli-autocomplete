@@ -85,31 +85,24 @@ pub fn generate_prompt(current_profile: Option<&str>, warning: bool) -> String {
     format!("{profile_part}{warning_symbol}{}", "> ".magenta())
 }
 
-/// Complete commands that start with a slash
-fn complete_command(word: &str, start: usize) -> (usize, Vec<String>) {
-    (
-        start,
-        COMMANDS
-            .iter()
-            .filter(|p| p.starts_with(word))
-            .map(|s| (*s).to_owned())
-            .collect(),
-    )
-}
-
 /// A wrapper around FilenameCompleter that provides enhanced path detection
 /// and completion capabilities for the chat interface.
-pub struct PathCompleter {
-    /// The underlying filename completer from rustyline
-    filename_completer: FilenameCompleter,
+pub enum PathCompleter {
+    /// Standard path completer with filename completion
+    Standard(FilenameCompleter),
+    /// Context-aware path completer with access to the context manager
+    ContextAware(FilenameCompleter, crate::cli::chat::context::ContextManager),
 }
 
 impl PathCompleter {
     /// Creates a new PathCompleter instance
     pub fn new() -> Self {
-        Self {
-            filename_completer: FilenameCompleter::new(),
-        }
+        Self::Standard(FilenameCompleter::new())
+    }
+
+    /// Creates a new PathCompleter with context
+    pub fn with_context(context_manager: crate::cli::chat::context::ContextManager) -> Self {
+        Self::ContextAware(FilenameCompleter::new(), context_manager)
     }
 
     /// Attempts to complete a file path at the given position in the line
@@ -120,7 +113,12 @@ impl PathCompleter {
         ctx: &Context<'_>,
     ) -> Result<(usize, Vec<String>), ReadlineError> {
         // Use the filename completer to get path completions
-        match self.filename_completer.complete(line, pos, ctx) {
+        let filename_completer = match self {
+            Self::Standard(completer) => completer,
+            Self::ContextAware(completer, _) => completer,
+        };
+
+        match filename_completer.complete(line, pos, ctx) {
             Ok((pos, completions)) => {
                 // Convert the filename completer's pairs to strings
                 let file_completions: Vec<String> = completions.iter().map(|pair| pair.replacement.clone()).collect();
@@ -129,6 +127,36 @@ impl PathCompleter {
                 Ok((pos, file_completions))
             },
             Err(err) => Err(err),
+        }
+    }
+
+    /// Get a reference to the context manager if available
+    pub fn context_manager(&self) -> Option<&crate::cli::chat::context::ContextManager> {
+        match self {
+            Self::Standard(_) => None,
+            Self::ContextAware(_, ctx) => Some(ctx),
+        }
+    }
+    
+    /// Complete a file path with the given prefix
+    pub fn complete(&self, path_prefix: &str) -> Vec<String> {
+        // Create a dummy context for the filename completer
+        let empty_history = DefaultHistory::new();
+        let ctx = Context::new(&empty_history);
+        
+        // Use the filename completer to get path completions
+        let filename_completer = match self {
+            Self::Standard(completer) => completer,
+            Self::ContextAware(completer, _) => completer,
+        };
+        
+        // Try to complete the path
+        match filename_completer.complete(path_prefix, path_prefix.len(), &ctx) {
+            Ok((_, completions)) => {
+                // Convert the filename completer's pairs to strings
+                completions.iter().map(|pair| pair.replacement.clone()).collect()
+            },
+            Err(_) => Vec::new(),
         }
     }
 }
@@ -166,9 +194,16 @@ pub struct ChatCompleter {
 }
 
 impl ChatCompleter {
-    fn new(sender: std::sync::mpsc::Sender<Option<String>>, receiver: std::sync::mpsc::Receiver<Vec<String>>) -> Self {
+    fn new(
+        sender: std::sync::mpsc::Sender<Option<String>>,
+        receiver: std::sync::mpsc::Receiver<Vec<String>>,
+        context_manager: Option<crate::cli::chat::context::ContextManager>,
+    ) -> Self {
         Self {
-            path_completer: PathCompleter::new(),
+            path_completer: match context_manager {
+                Some(cm) => PathCompleter::with_context(cm),
+                None => PathCompleter::new(),
+            },
             prompt_completer: PromptCompleter::new(sender, receiver),
         }
     }
@@ -183,11 +218,41 @@ impl Completer for ChatCompleter {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> Result<(usize, Vec<Self::Candidate>), ReadlineError> {
-        let (start, word) = extract_word(line, pos, None, |c| c.is_space());
+        let (start, _word) = extract_word(line, pos, None, |c| c.is_space());
 
-        // Handle command completion
-        if word.starts_with('/') {
-            return Ok(complete_command(word, start));
+        // Handle command completion using the enhanced Command::get_completion_suggestions
+        if line.starts_with('/') {
+            // Use the context-aware completion system
+            let partial_command = line[..pos].trim_end();
+
+            // Create a CompletionContextAdapter if we have a context manager
+            let context_adapter = if let Some(_cm) = self.path_completer.context_manager() {
+                use std::boxed::Box;
+
+                use crate::cli::chat::commands::completion_adapter::CompletionContextAdapter;
+                use crate::cli::chat::{
+                    ConversationState,
+                    ToolPermissions,
+                };
+
+                // Create a minimal context adapter with the completion cache
+                Some(CompletionContextAdapter {
+                    conversation_state: Box::leak(Box::new(ConversationState::new_minimal_blocking())),
+                    tool_permissions: Box::leak(Box::new(ToolPermissions::new(0))),
+                    completion_cache: Box::leak(Box::new(
+                        crate::cli::chat::commands::completion_adapter::CompletionCache::new(),
+                    )),
+                    path_completer: Some(&self.path_completer),
+                })
+            } else {
+                None
+            };
+
+            let suggestions = crate::cli::chat::command::Command::get_completion_suggestions(
+                partial_command,
+                context_adapter.as_ref(),
+            );
+            return Ok((0, suggestions));
         }
 
         if line.starts_with('@') {
@@ -264,6 +329,7 @@ impl Highlighter for ChatHelper {
 pub fn rl(
     sender: std::sync::mpsc::Sender<Option<String>>,
     receiver: std::sync::mpsc::Receiver<Vec<String>>,
+    context_manager: Option<crate::cli::chat::context::ContextManager>,
 ) -> Result<Editor<ChatHelper, DefaultHistory>> {
     let edit_mode = match crate::settings::settings::get_string_opt("chat.editMode").as_deref() {
         Some("vi" | "vim") => EditMode::Vi,
@@ -275,7 +341,7 @@ pub fn rl(
         .edit_mode(edit_mode)
         .build();
     let h = ChatHelper {
-        completer: ChatCompleter::new(sender, receiver),
+        completer: ChatCompleter::new(sender, receiver, context_manager),
         hinter: (),
         validator: MultiLineValidator,
     };
@@ -325,7 +391,7 @@ mod tests {
     fn test_chat_completer_command_completion() {
         let (prompt_request_sender, _) = std::sync::mpsc::channel::<Option<String>>();
         let (_, prompt_response_receiver) = std::sync::mpsc::channel::<Vec<String>>();
-        let completer = ChatCompleter::new(prompt_request_sender, prompt_response_receiver);
+        let completer = ChatCompleter::new(prompt_request_sender, prompt_response_receiver, None);
         let line = "/h";
         let pos = 2; // Position at the end of "/h"
 
@@ -347,7 +413,7 @@ mod tests {
     fn test_chat_completer_no_completion() {
         let (prompt_request_sender, _) = std::sync::mpsc::channel::<Option<String>>();
         let (_, prompt_response_receiver) = std::sync::mpsc::channel::<Vec<String>>();
-        let completer = ChatCompleter::new(prompt_request_sender, prompt_response_receiver);
+        let completer = ChatCompleter::new(prompt_request_sender, prompt_response_receiver, None);
         let line = "Hello, how are you?";
         let pos = line.len();
 

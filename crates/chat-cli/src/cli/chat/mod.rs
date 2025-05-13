@@ -432,7 +432,7 @@ pub async fn chat(
         State::new(),
         output,
         input,
-        InputSource::new(prompt_request_sender, prompt_response_receiver)?,
+        InputSource::new(prompt_request_sender, prompt_response_receiver, None)?,
         interactive,
         client,
         || terminal::window_size().map(|s| s.columns.into()).ok(),
@@ -801,6 +801,63 @@ impl ChatContext {
                     pending_tool_index,
                     skip_printing_tools,
                 } => {
+                    // Update the completion cache before prompting the user
+                    // This ensures the cache is up-to-date right before the user might need completions
+                    if let Some(context_manager) = &self.conversation_state.context_manager {
+                        // Update the cache with the latest data from the context manager
+                        // Create a static CompletionCache that lives for the duration of the program
+                        static COMPLETION_CACHE: std::sync::OnceLock<commands::completion_adapter::CompletionCache> =
+                            std::sync::OnceLock::new();
+                        let cache =
+                            COMPLETION_CACHE.get_or_init(|| commands::completion_adapter::CompletionCache::new());
+
+                        let adapter = commands::CompletionContextAdapter {
+                            conversation_state: &self.conversation_state,
+                            tool_permissions: &self.tool_permissions,
+                            completion_cache: cache,
+                            path_completer: None,
+                        };
+
+                        // Update hooks cache
+                        let mut current_hooks = Vec::new();
+                        let mut global_hooks = Vec::new();
+                        let mut enabled_hooks = Vec::new();
+                        let mut disabled_hooks = Vec::new();
+
+                        // Process profile hooks
+                        for (name, hook) in &context_manager.profile_config.hooks {
+                            current_hooks.push(name.clone());
+                            if !hook.disabled {
+                                enabled_hooks.push(name.clone());
+                            } else {
+                                disabled_hooks.push(name.clone());
+                            }
+                        }
+
+                        // Process global hooks
+                        for (name, hook) in &context_manager.global_config.hooks {
+                            global_hooks.push(name.clone());
+                            if !hook.disabled {
+                                enabled_hooks.push(name.clone());
+                            } else {
+                                disabled_hooks.push(name.clone());
+                            }
+                        }
+
+                        adapter.completion_cache.update("hooks", "current", current_hooks);
+                        adapter.completion_cache.update("hooks", "global", global_hooks);
+                        adapter.completion_cache.update("hooks", "enabled", enabled_hooks);
+                        adapter.completion_cache.update("hooks", "disabled", disabled_hooks);
+
+                        // Ensure trigger types are cached
+                        if !adapter.completion_cache.has_key("hooks", "triggers") {
+                            adapter.completion_cache.update("hooks", "triggers", vec![
+                                "conversation_start".to_string(),
+                                "per_prompt".to_string(),
+                            ]);
+                        }
+                    }
+
                     // Cannot prompt in non-interactive mode no matter what.
                     if !self.interactive {
                         return Ok(());
