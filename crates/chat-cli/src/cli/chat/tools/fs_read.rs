@@ -1277,6 +1277,28 @@ mod tests {
     }
 
     #[test]
+    fn test_path_or_paths() {
+        // Test single path
+        let single = PathOrPaths::Single("test.txt".to_string());
+        assert!(!single.is_batch());
+        assert_eq!(single.as_single(), Some("test.txt"));
+        assert_eq!(single.as_multiple(), None);
+        let paths: Vec<String> = single.iter().cloned().collect();
+        assert_eq!(paths, vec!["test.txt".to_string()]);
+
+        // Test multiple paths
+        let multiple = PathOrPaths::Multiple(vec!["test1.txt".to_string(), "test2.txt".to_string()]);
+        assert!(multiple.is_batch());
+        assert_eq!(multiple.as_single(), None);
+        assert_eq!(
+            multiple.as_multiple(),
+            Some(&["test1.txt".to_string(), "test2.txt".to_string()][..])
+        );
+        let paths: Vec<String> = multiple.iter().cloned().collect();
+        assert_eq!(paths, vec!["test1.txt".to_string(), "test2.txt".to_string()]);
+    }
+
+    #[test]
     fn test_fs_read_deser() {
         serde_json::from_value::<FsRead>(serde_json::json!({ "path": "/test_file.txt", "mode": "Line" })).unwrap();
         serde_json::from_value::<FsRead>(
@@ -1297,8 +1319,22 @@ mod tests {
         )
         .unwrap();
         serde_json::from_value::<FsRead>(
-            serde_json::json!({ "path": "/test_file.txt", "mode": "Search", "pattern": "hello" }),
+            serde_json::json!({ "path": "/test_file.txt", "mode": "Search", "substring_match": "hello" }),
         )
+        .unwrap();
+        serde_json::from_value::<FsRead>(serde_json::json!({
+            "summary": "batch demo",
+            "file_reads": [
+                { "mode": "Line", "path": "/a.txt", "start_line": 1, "end_line": 10 },
+                { "mode": "Directory", "path": "/",   "depth": 1 },
+                { "mode": "Search", "path": "/b.txt", "substring_match": "foo" }
+            ]
+        }))
+        .unwrap();
+        serde_json::from_value::<FsRead>(serde_json::json!({
+            "mode": "Line",
+            "path": ["/x.txt", "/y.txt"]
+        }))
         .unwrap();
     }
 
@@ -1442,7 +1478,7 @@ mod tests {
         let matches = invoke_search!({
             "mode": "Search",
             "path": TEST_FILE_PATH,
-            "pattern": "hello",
+            "substring_match": "hello",
         });
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].line_number, 1);
