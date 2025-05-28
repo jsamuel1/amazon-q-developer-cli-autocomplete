@@ -626,48 +626,17 @@ impl FsLine {
             return Ok(());
         }
 
-        let path_str = self.path.as_single().unwrap();
-        let path = sanitize_path_tool_arg(ctx, path_str);
-        let line_count = ctx.fs().read_to_string(&path).await?.lines().count();
-        queue!(
-            updates,
-            style::Print("   Reading file: "),
-            style::SetForegroundColor(Color::Green),
-            style::Print(path_str),
-            style::ResetColor,
-            style::Print(", "),
-        )?;
-
-        let start = convert_negative_index(line_count, self.start_line()) + 1;
-        let end = convert_negative_index(line_count, self.end_line()) + 1;
-        match (start, end) {
-            _ if start == 1 && end == line_count => {
-                queue!(updates, style::Print("all lines".to_string()))?;
+        queue_desc_line(
+            ctx,
+            &FsLineOperation {
+                path: self.path.as_single().unwrap().to_string(),
+                start_line: Some(self.start_line()),
+                end_line: Some(self.end_line()),
+                summary: self.summary.clone(),
             },
-            _ if end == line_count => queue!(
-                updates,
-                style::Print("from line "),
-                style::SetForegroundColor(Color::Green),
-                style::Print(start),
-                style::ResetColor,
-                style::Print(" to end of file"),
-            )?,
-            _ => queue!(
-                updates,
-                style::Print("from line "),
-                style::SetForegroundColor(Color::Green),
-                style::Print(start),
-                style::ResetColor,
-                style::Print(" to "),
-                style::SetForegroundColor(Color::Green),
-                style::Print(end),
-                style::ResetColor,
-            )?,
-        };
-
-        // Add the summary if available
-        super::queue_summary(self.summary.as_deref(), updates, None)?;
-
+            updates,
+        )
+        .await?;
         Ok(())
     }
 
@@ -768,23 +737,15 @@ impl FsSearch {
             return Ok(());
         }
 
-        let path_str = self.path.as_single().unwrap();
-        queue!(
+        let _ = queue_desc_search(
+            &FsSearchOperation {
+                path: self.path.as_single().unwrap().to_string(),
+                substring_match: self.substring_match.to_lowercase(),
+                context_lines: self.context_lines,
+                summary: self.summary.clone(),
+            },
             updates,
-            style::Print("   Searching: "),
-            style::SetForegroundColor(Color::Green),
-            style::Print(path_str),
-            style::ResetColor,
-            style::Print(" for substring: "),
-            style::SetForegroundColor(Color::Green),
-            style::Print(&self.substring_match.to_lowercase()),
-            style::ResetColor,
-            style::Print("\n"),
-        )?;
-
-        // Add the summary if available
-        super::queue_summary(self.summary.as_deref(), updates, None)?;
-
+        );
         Ok(())
     }
 
@@ -887,21 +848,14 @@ impl FsDirectory {
             return Ok(());
         }
 
-        let path_str = self.path.as_single().unwrap();
-        queue!(
+        let _ = queue_desc_dir(
+            &FsDirectoryOperation {
+                path: self.path.as_single().unwrap().to_string(),
+                depth: self.depth,
+                summary: self.summary.clone(),
+            },
             updates,
-            style::Print("   Reading directory: "),
-            style::SetForegroundColor(Color::Green),
-            style::Print(path_str),
-            style::ResetColor,
-            style::Print(" "),
-        )?;
-        let depth = self.depth.unwrap_or_default();
-        queue!(updates, style::Print(format!("with maximum depth of {}", depth)))?;
-
-        // Add the summary if available
-        super::queue_summary(self.summary.as_deref(), updates, None)?;
-
+        );
         Ok(())
     }
 
@@ -1118,7 +1072,7 @@ fn queue_desc_dir(op: &FsDirectoryOperation, updates: &mut impl Write) -> Result
         style::SetForegroundColor(Color::Green),
         style::Print(&op.path),
         style::ResetColor,
-        style::Print(" with depth "),
+        style::Print(" with maximum depth of "),
         style::SetForegroundColor(Color::Green),
         style::Print(op.depth.unwrap_or(0)),
         style::ResetColor
@@ -1134,7 +1088,7 @@ fn queue_desc_search(op: &FsSearchOperation, updates: &mut impl Write) -> Result
         style::SetForegroundColor(Color::Green),
         style::Print(&op.path),
         style::ResetColor,
-        style::Print(" for pattern: "),
+        style::Print(" for substring: "),
         style::SetForegroundColor(Color::Green),
         style::Print(&op.substring_match.to_lowercase()),
         style::ResetColor
