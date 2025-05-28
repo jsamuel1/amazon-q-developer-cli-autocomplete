@@ -3087,7 +3087,6 @@ impl ChatContext {
                         OutputKind::Text(ref text) => {
                             debug!("Output is Text: {}", text);
                             content_blocks.push(ToolUseResultBlock::Text(text.clone()));
-
                         },
                         OutputKind::Json(ref json) => {
                             debug!("Output is JSON: {}", json);
@@ -3102,6 +3101,7 @@ impl ChatContext {
                                 images.len(),
                                 text.len()
                             );
+                            image_blocks.extend(images.clone());
                             content_blocks.push(ToolUseResultBlock::Text(text.clone()));
                         },
                     }

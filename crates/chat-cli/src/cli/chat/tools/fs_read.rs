@@ -39,6 +39,7 @@ use super::{
 };
 use crate::cli::chat::CONTINUATION_LINE;
 use crate::cli::chat::util::images::{
+    RichImageBlocks,
     handle_images_from_paths,
     is_supported_image_type,
     pre_process,
@@ -463,9 +464,8 @@ impl FsRead {
             FsRead::Operations(ops) => {
                 debug!("Executing {} operations", ops.file_reads.len());
                 let mut results = Vec::with_capacity(ops.file_reads.len());
-                use crate::cli::chat::util::images::RichImageBlocks;
-
                 let mut image_blocks: RichImageBlocks = Vec::new();
+                let mut image_count: usize = 0;
                 for op in &ops.file_reads {
                     match op {
                         FsReadOperation::Line(l) => {
@@ -483,6 +483,7 @@ impl FsRead {
                         FsReadOperation::Image(img) => {
                             let result = img.invoke(ctx, updates).await?;
                             if let OutputKind::Images(mut imgs) = result.output {
+                                image_count += imgs.len().max(1);
                                 image_blocks.append(&mut imgs);
                             }
                         },
@@ -500,7 +501,9 @@ impl FsRead {
                 super::queue_function_result(
                     &format!(
                         "Summary: {} files processed, {} successful, {} failed",
-                        batch_result.total_files, batch_result.successful_reads, batch_result.failed_reads
+                        batch_result.total_files + image_count,
+                        batch_result.successful_reads + image_count,
+                        batch_result.failed_reads
                     ),
                     updates,
                     false,
