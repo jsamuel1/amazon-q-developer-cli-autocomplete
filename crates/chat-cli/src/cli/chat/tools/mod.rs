@@ -276,6 +276,7 @@ impl InvokeOutput {
             OutputKind::Text(s) => s.as_str(),
             OutputKind::Json(j) => j.as_str().unwrap_or_default(),
             OutputKind::Images(_) => "",
+            OutputKind::ImagesAndText { text, .. } => text.as_str(),
         }
     }
 }
@@ -286,6 +287,7 @@ pub enum OutputKind {
     Text(String),
     Json(serde_json::Value),
     Images(RichImageBlocks),
+    ImagesAndText { images: RichImageBlocks, text: String },
 }
 
 impl Default for OutputKind {

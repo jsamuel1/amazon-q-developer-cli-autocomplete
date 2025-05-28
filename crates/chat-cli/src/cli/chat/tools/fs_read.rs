@@ -249,14 +249,8 @@ time. You tried to read {byte_count} bytes. Try executing with fewer lines speci
 }
 
 /// Helper function to read a directory with specified depth
-async fn read_single_directory(
-    ctx: &Context,
-    path_str: &str,
-    depth: Option<usize>,
-    updates: &mut impl Write,
-) -> Result<String> {
+async fn read_single_directory(ctx: &Context, path_str: &str, depth: Option<usize>) -> Result<String> {
     let path = sanitize_path_tool_arg(ctx, path_str);
-    let cwd = ctx.env().current_dir()?;
     let max_depth = depth.unwrap_or(FsDirectory::DEFAULT_DEPTH);
     debug!(?path, max_depth, "Reading directory at path with depth");
     let mut result = Vec::new();
@@ -265,17 +259,6 @@ async fn read_single_directory(
     while let Some((path, depth)) = dir_queue.pop_front() {
         if depth > max_depth {
             break;
-        }
-        let relative_path = format_path(&cwd, &path);
-        if !relative_path.is_empty() {
-            queue!(
-                updates,
-                style::Print("   Reading: "),
-                style::SetForegroundColor(Color::Green),
-                style::Print(&relative_path),
-                style::ResetColor,
-                style::Print("\n"),
-            )?;
         }
         let mut read_dir = ctx.fs().read_dir(path).await?;
 
@@ -355,11 +338,11 @@ async fn read_single_directory(
     Ok(result)
 }
 
-/// Helper function to search a file with specified pattern
+/// Helper function to search a file with specified substring
 async fn search_single_file(
     ctx: &Context,
     path_str: &str,
-    pattern: &str,
+    substring: &str,
     context_lines: Option<usize>,
     updates: &mut impl Write,
 ) -> Result<String> {
@@ -374,9 +357,9 @@ async fn search_single_file(
     let mut total_matches = 0;
 
     // Case insensitive search
-    let pattern_lower = pattern.to_lowercase();
+    let substring_lower = substring.to_lowercase();
     for (line_num, line) in lines.iter().enumerate() {
-        if line.to_lowercase().contains(&pattern_lower) {
+        if line.to_lowercase().contains(&substring_lower) {
             total_matches += 1;
             let start = line_num.saturating_sub(context_lines);
             let end = lines.len().min(line_num + context_lines + 1);
@@ -401,8 +384,8 @@ async fn search_single_file(
     // Format the search results summary with consistent styling
     super::queue_function_result(
         &format!(
-            "Found {} matches for pattern '{}' in {}",
-            total_matches, pattern, relative_path
+            "Found {} matches for substring '{}' in {}",
+            total_matches, substring, relative_path
         ),
         updates,
         false,
@@ -480,7 +463,9 @@ impl FsRead {
             FsRead::Operations(ops) => {
                 debug!("Executing {} operations", ops.file_reads.len());
                 let mut results = Vec::with_capacity(ops.file_reads.len());
+                use crate::cli::chat::util::images::RichImageBlocks;
 
+                let mut image_blocks: RichImageBlocks = Vec::new();
                 for op in &ops.file_reads {
                     match op {
                         FsReadOperation::Line(l) => {
@@ -497,10 +482,8 @@ impl FsRead {
                         },
                         FsReadOperation::Image(img) => {
                             let result = img.invoke(ctx, updates).await?;
-                            if let OutputKind::Images(images) = result.output {
-                                return Ok(InvokeOutput {
-                                    output: OutputKind::Images(images),
-                                });
+                            if let OutputKind::Images(mut imgs) = result.output {
+                                image_blocks.append(&mut imgs);
                             }
                         },
                     }
@@ -523,6 +506,15 @@ impl FsRead {
                     false,
                     true,
                 )?;
+
+                if !image_blocks.is_empty() {
+                    return Ok(InvokeOutput {
+                        output: OutputKind::ImagesAndText {
+                            images: image_blocks,
+                            text: serde_json::to_string(&batch_result)?,
+                        },
+                    });
+                }
 
                 // If there's only one operation and it's not an image, return its content directly
                 if batch_result.total_files == 1 && batch_result.successful_reads == 1 {
@@ -572,6 +564,7 @@ impl FsImage {
     pub async fn invoke(&self, ctx: &Context, updates: &mut impl Write) -> Result<InvokeOutput> {
         let pre_processed_paths: Vec<String> = self.image_paths.iter().map(|path| pre_process(ctx, path)).collect();
         let valid_images = handle_images_from_paths(updates, &pre_processed_paths);
+        super::queue_function_result(&format!("Successfully read image"), updates, false, false)?;
         Ok(InvokeOutput {
             output: OutputKind::Images(valid_images),
         })
@@ -759,7 +752,7 @@ impl FsSearch {
                 style::SetForegroundColor(Color::Green),
                 style::Print(format!("{} files", paths.len())),
                 style::ResetColor,
-                style::Print(" for pattern: "),
+                style::Print(" for substring: "),
                 style::SetForegroundColor(Color::Green),
                 style::Print(&self.substring_match.to_lowercase()),
                 style::ResetColor,
@@ -779,7 +772,7 @@ impl FsSearch {
             style::SetForegroundColor(Color::Green),
             style::Print(path_str),
             style::ResetColor,
-            style::Print(" for pattern: "),
+            style::Print(" for substring: "),
             style::SetForegroundColor(Color::Green),
             style::Print(&self.substring_match.to_lowercase()),
             style::ResetColor,
@@ -909,7 +902,7 @@ impl FsDirectory {
         Ok(())
     }
 
-    pub async fn invoke(&self, ctx: &Context, updates: &mut impl Write) -> Result<InvokeOutput> {
+    pub async fn invoke(&self, ctx: &Context, _updates: &mut impl Write) -> Result<InvokeOutput> {
         // Handle batch operation
         if self.path.is_batch() {
             let paths = self.path.as_multiple().unwrap();
@@ -917,7 +910,7 @@ impl FsDirectory {
 
             for path_str in paths {
                 let path = sanitize_path_tool_arg(ctx, path_str);
-                let result = read_single_directory(ctx, path_str, Some(self.depth()), updates).await;
+                let result = read_single_directory(ctx, path_str, Some(self.depth())).await;
                 match result {
                     Ok(content) => {
                         // Get directory metadata for last modified timestamp
@@ -939,7 +932,7 @@ impl FsDirectory {
 
         // Handle single directory operation
         let path_str = self.path.as_single().unwrap();
-        match read_single_directory(ctx, path_str, Some(self.depth()), updates).await {
+        match read_single_directory(ctx, path_str, Some(self.depth())).await {
             Ok(directory_contents) => {
                 // For single directory operations, return content directly for backward compatibility
                 Ok(InvokeOutput {
@@ -1061,7 +1054,7 @@ async fn validate_dir(ctx: &Context, path_str: &str) -> Result<()> {
 
 async fn validate_search(ctx: &Context, path_str: &str, substring_match: &str) -> Result<()> {
     if substring_match.is_empty() {
-        bail!("Search pattern cannot be empty");
+        bail!("Search substring cannot be empty");
     }
     let path = sanitize_path_tool_arg(ctx, path_str);
     let rel = format_path(ctx.env().current_dir()?, &path);
@@ -1172,7 +1165,7 @@ async fn perform_line(ctx: &Context, op: &FsLineOperation, updates: &mut impl Wr
 }
 
 async fn perform_dir(ctx: &Context, op: &FsDirectoryOperation, updates: &mut impl Write) -> Result<FileReadResult> {
-    match read_single_directory(ctx, &op.path, op.depth, updates).await {
+    match read_single_directory(ctx, &op.path, op.depth).await {
         Ok(content) => {
             let metadata = ctx
                 .fs()
@@ -1213,18 +1206,6 @@ async fn perform_search(ctx: &Context, op: &FsSearchOperation, updates: &mut imp
                 .symlink_metadata(sanitize_path_tool_arg(ctx, &op.path))
                 .await
                 .ok();
-            let matches: Vec<SearchMatch> = serde_json::from_str(&content).unwrap_or_default();
-            super::queue_function_result(
-                &format!(
-                    "Found {} matches for '{}' in {}",
-                    matches.len(),
-                    op.substring_match,
-                    &op.path
-                ),
-                updates,
-                false,
-                false,
-            )?;
             Ok(FileReadResult::success(op.path.clone(), content, metadata.as_ref()))
         },
         Err(e) => {
