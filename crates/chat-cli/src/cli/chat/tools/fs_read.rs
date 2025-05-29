@@ -569,7 +569,7 @@ impl FsImage {
     pub async fn invoke(&self, ctx: &Context, updates: &mut impl Write) -> Result<InvokeOutput> {
         let pre_processed_paths: Vec<String> = self.image_paths.iter().map(|path| pre_process(ctx, path)).collect();
         let valid_images = handle_images_from_paths(updates, &pre_processed_paths);
-        super::queue_function_result(&format!("Successfully read image"), updates, false, false)?;
+        super::queue_function_result(&"Successfully read image".to_string(), updates, false, false)?;
         Ok(InvokeOutput {
             output: OutputKind::Images(valid_images),
         })
