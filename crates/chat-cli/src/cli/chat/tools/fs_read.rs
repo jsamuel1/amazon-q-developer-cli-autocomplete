@@ -498,17 +498,19 @@ impl FsRead {
                     style::Print("\n")
                 )?;
 
-                super::queue_function_result(
-                    &format!(
-                        "Summary: {} files processed, {} successful, {} failed",
-                        batch_result.total_files + image_count,
-                        batch_result.successful_reads + image_count,
-                        batch_result.failed_reads
-                    ),
-                    updates,
-                    false,
-                    true,
-                )?;
+                if batch_result.total_files + image_count > 1 {
+                    super::queue_function_result(
+                        &format!(
+                            "Summary: {} files processed, {} successful, {} failed",
+                            batch_result.total_files + image_count,
+                            batch_result.successful_reads + image_count,
+                            batch_result.failed_reads
+                        ),
+                        updates,
+                        false,
+                        true,
+                    )?;
+                }
 
                 if !image_blocks.is_empty() {
                     return Ok(InvokeOutput {
