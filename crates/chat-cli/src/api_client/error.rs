@@ -96,11 +96,13 @@ impl ReasonCode for ApiClientError {
             ApiClientError::QDeveloperChatResponseStream(e) => sdk_error_code(e),
             ApiClientError::ListAvailableProfilesError(e) => sdk_error_code(e),
             ApiClientError::SendTelemetryEvent(e) => sdk_error_code(e),
+            ApiClientError::CreateSubscriptionToken(e) => sdk_error_code(e),
             ApiClientError::QuotaBreach(_) => "QuotaBreachError".to_string(),
             ApiClientError::ContextWindowOverflow => "ContextWindowOverflow".to_string(),
             ApiClientError::SmithyBuild(_) => "SmithyBuildError".to_string(),
             ApiClientError::AuthError(_) => "AuthError".to_string(),
             ApiClientError::ModelOverloadedError { .. } => "ModelOverloadedError".to_string(),
+            ApiClientError::MonthlyLimitReached => "MonthlyLimitReached".to_string(),
         }
     }
 }
