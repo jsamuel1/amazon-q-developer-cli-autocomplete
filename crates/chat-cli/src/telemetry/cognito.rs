@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use amzn_toolkit_telemetry_client::config::BehaviorVersion;
 use aws_credential_types::provider::error::CredentialsError;
 use aws_credential_types::{
@@ -8,7 +10,10 @@ use aws_sdk_cognitoidentity::primitives::{
     DateTime,
     DateTimeFormat,
 };
-use tracing::trace;
+use tracing::{
+    trace,
+    warn,
+};
 
 use crate::aws_common::app_name;
 use crate::database::{
@@ -83,6 +88,10 @@ pub async fn get_cognito_credentials(
             session_token,
             expiration,
         }) => {
+            if is_expired(expiration.as_ref()) {
+                return get_cognito_credentials_send(database, telemetry_stage).await;
+            }
+
             let Some(access_key_id) = access_key_id else {
                 return get_cognito_credentials_send(database, telemetry_stage).await;
             };
@@ -130,6 +139,27 @@ impl provider::ProvideCredentials for CognitoProvider {
                 ))),
             }
         })
+    }
+}
+
+fn is_expired(expiration: Option<&String>) -> bool {
+    let expiration = if let Some(v) = expiration {
+        v
+    } else {
+        warn!("no cognito expiration was saved");
+        return true;
+    };
+
+    match DateTime::from_str(expiration, DateTimeFormat::DateTime) {
+        Ok(expiration) => {
+            // Check if the expiration is at least after five minutes after the current time.
+            let curr: DateTime = (SystemTime::now() + std::time::Duration::from_secs(60 * 5)).into();
+            expiration < curr
+        },
+        Err(err) => {
+            warn!(?err, "invalid cognito expiration was saved");
+            true
+        },
     }
 }
 
