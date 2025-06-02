@@ -1336,7 +1336,7 @@ impl ChatContext {
         Ok(match command {
             Command::Ask { prompt } => {
                 // Check for a pending tool approval
-                let mut reason_prompt= String::from("Tool denied: ");
+                let mut reason_prompt = String::from("Tool denied: ");
                 if let Some(index) = pending_tool_index {
                     let tool_use = &mut tool_uses[index];
 
@@ -1348,7 +1348,7 @@ impl ChatContext {
                         tool_use.accepted = true;
 
                         return Ok(ChatState::ExecuteTools(tool_uses));
-                    // Prompt reason if no selected 
+                    // Prompt reason if no selected
                     } else if ["n", "N"].contains(&prompt.as_str()) {
                         tool_use.accepted = false;
                         execute!(
@@ -1362,7 +1362,9 @@ impl ChatContext {
                             _ => "No reason provided".to_string(),
                         };
                         reason_prompt.push_str(&reason);
-                        reason_prompt.push_str(". Take user feedback and try again if reason provided, else continue conversation.");
+                        reason_prompt.push_str(
+                            ". Take user feedback and try again if reason provided, else continue conversation.",
+                        );
                     }
                 } else if !self.pending_prompts.is_empty() {
                     let prompts = self.pending_prompts.drain(0..).collect();
@@ -1383,7 +1385,7 @@ impl ChatContext {
                 } else {
                     self.conversation_state.set_next_user_message(user_input).await;
                 }
-                
+
                 let conv_state = self.conversation_state.as_sendable_conversation_state(true).await;
                 self.send_tool_use_telemetry(telemetry).await;
 
@@ -3992,11 +3994,13 @@ mod tests {
                 "/tools untrust fs_write".to_string(),
                 "create a file".to_string(), // prompt again due to untrust
                 "n".to_string(),             // cancel
+                "No reason".to_string(),     // provide reason for cancel
                 "/tools trust fs_write".to_string(),
                 "create a file".to_string(), // again without prompting due to '/tools trust'
                 "/tools reset".to_string(),
                 "create a file".to_string(), // prompt again due to reset
                 "n".to_string(),             // cancel
+                "No reason".to_string(),     // provide reason for cancel
                 "exit".to_string(),
             ]),
             true,
