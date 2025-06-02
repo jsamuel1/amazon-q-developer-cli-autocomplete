@@ -1,11 +1,9 @@
-pub mod cli;
 mod command;
 mod consts;
 mod context;
 mod conversation_state;
 mod hooks;
 mod input_source;
-pub mod mcp;
 mod message;
 mod parse;
 mod parser;
@@ -14,8 +12,8 @@ mod server_messenger;
 #[cfg(unix)]
 mod skim_integration;
 mod token_counter;
-mod tool_manager;
-mod tools;
+pub mod tool_manager;
+pub mod tools;
 pub mod util;
 
 use std::borrow::Cow;
@@ -24,6 +22,7 @@ use std::collections::{
     HashSet,
     VecDeque,
 };
+use std::error::Error;
 use std::io::{
     IsTerminal,
     Read,
@@ -40,6 +39,7 @@ use std::{
     fs,
 };
 
+use clap::Args;
 use command::{
     Command,
     PromptsSubcommand,
@@ -66,6 +66,7 @@ use crossterm::{
     terminal,
 };
 use eyre::{
+    Chain,
     ErrReport,
     Result,
     bail,
@@ -160,9 +161,192 @@ use crate::mcp_client::{
     PromptGetResult,
 };
 use crate::platform::Context;
-use crate::telemetry::TelemetryThread;
 use crate::telemetry::core::ToolUseEventBuilder;
+use crate::telemetry::{
+    TelemetryResult,
+    TelemetryThread,
+};
 use crate::util::CLI_BINARY_NAME;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
+pub struct ChatArgs {
+    /// (Deprecated, use --trust-all-tools) Enabling this flag allows the model to execute
+    /// all commands without first accepting them.
+    #[arg(short, long, hide = true)]
+    pub accept_all: bool,
+    /// Print the first response to STDOUT without interactive mode. This will fail if the
+    /// prompt requests permissions to use a tool, unless --trust-all-tools is also used.
+    #[arg(long)]
+    pub no_interactive: bool,
+    /// Resumes the previous conversation from this directory.
+    #[arg(short, long)]
+    pub resume: bool,
+    /// The first question to ask
+    pub input: Option<String>,
+    /// Context profile to use
+    #[arg(long = "profile")]
+    pub profile: Option<String>,
+    /// Allows the model to use any tool to run commands without asking for confirmation.
+    #[arg(long)]
+    pub trust_all_tools: bool,
+    /// Trust only this set of tools. Example: trust some tools:
+    /// '--trust-tools=fs_read,fs_write', trust no tools: '--trust-tools='
+    #[arg(long, value_delimiter = ',', value_name = "TOOL_NAMES")]
+    pub trust_tools: Option<Vec<String>>,
+}
+
+impl ChatArgs {
+    pub async fn execute(self, database: &mut Database, telemetry: &TelemetryThread) -> Result<ExitCode> {
+        if !crate::util::system_info::in_cloudshell() && !crate::auth::is_logged_in(database).await {
+            bail!(
+                "You are not logged in, please log in with {}",
+                format!("{CLI_BINARY_NAME} login").bold()
+            );
+        }
+
+        region_check("chat")?;
+
+        let ctx = Context::new();
+
+        let stdin = std::io::stdin();
+        // no_interactive flag or part of a pipe
+        let interactive = !self.no_interactive && stdin.is_terminal();
+        let input = if !interactive && !stdin.is_terminal() {
+            // append to input string any extra info that was provided, e.g. via pipe
+            let mut input = self.input.unwrap_or_default();
+            stdin.lock().read_to_string(&mut input)?;
+            Some(input)
+        } else {
+            self.input
+        };
+
+        let mut output = match interactive {
+            true => SharedWriter::stderr(),
+            false => SharedWriter::stdout(),
+        };
+
+        let client = match ctx.env().get("Q_MOCK_CHAT_RESPONSE") {
+            Ok(json) => create_stream(serde_json::from_str(std::fs::read_to_string(json)?.as_str())?),
+            _ => StreamingClient::new(database).await?,
+        };
+
+        let mcp_server_configs = match McpServerConfig::load_config(&mut output).await {
+            Ok(config) => {
+                if interactive && !database.settings.get_bool(Setting::McpLoadedBefore).unwrap_or(false) {
+                    execute!(
+                        output,
+                        style::Print(
+                            "To learn more about MCP safety, see https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-mcp-security.html\n\n"
+                        )
+                    )?;
+                }
+                database.settings.set(Setting::McpLoadedBefore, true).await?;
+                config
+            },
+            Err(e) => {
+                warn!("No mcp server config loaded: {}", e);
+                McpServerConfig::default()
+            },
+        };
+
+        // If profile is specified, verify it exists before starting the chat
+        if let Some(ref profile_name) = self.profile {
+            // Create a temporary context manager to check if the profile exists
+            match ContextManager::new(Arc::clone(&ctx), None).await {
+                Ok(context_manager) => {
+                    let profiles = context_manager.list_profiles().await?;
+                    if !profiles.contains(profile_name) {
+                        bail!(
+                            "Profile '{}' does not exist. Available profiles: {}",
+                            profile_name,
+                            profiles.join(", ")
+                        );
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to initialize context manager to verify profile: {}", e);
+                    // Continue without verification if context manager can't be initialized
+                },
+            }
+        }
+
+        let conversation_id = Alphanumeric.sample_string(&mut rand::rng(), 9);
+        info!(?conversation_id, "Generated new conversation id");
+        let (prompt_request_sender, prompt_request_receiver) = std::sync::mpsc::channel::<Option<String>>();
+        let (prompt_response_sender, prompt_response_receiver) = std::sync::mpsc::channel::<Vec<String>>();
+        let tool_manager_output: Box<dyn Write + Send + Sync + 'static> = if interactive {
+            Box::new(output.clone())
+        } else {
+            Box::new(NullWriter {})
+        };
+        let mut tool_manager = ToolManagerBuilder::default()
+            .mcp_server_config(mcp_server_configs)
+            .prompt_list_sender(prompt_response_sender)
+            .prompt_list_receiver(prompt_request_receiver)
+            .conversation_id(&conversation_id)
+            .interactive(interactive)
+            .build(telemetry, tool_manager_output)
+            .await?;
+        let tool_config = tool_manager.load_tools(database, &mut output).await?;
+        let mut tool_permissions = ToolPermissions::new(tool_config.len());
+
+        let trust_tools = self.trust_tools.map(|mut tools| {
+            if tools.len() == 1 && tools[0].is_empty() {
+                tools.pop();
+            }
+            tools
+        });
+
+        if self.accept_all || self.trust_all_tools {
+            tool_permissions.trust_all = true;
+            for tool in tool_config.values() {
+                tool_permissions.trust_tool(&tool.name);
+            }
+
+            // Deprecation notice for --accept-all users
+            if self.accept_all && interactive {
+                queue!(
+                    output,
+                    style::SetForegroundColor(Color::Yellow),
+                    style::Print("\n--accept-all, -a is deprecated. Use --trust-all-tools instead."),
+                    style::SetForegroundColor(Color::Reset),
+                )?;
+            }
+        } else if let Some(trusted) = trust_tools.map(|vec| vec.into_iter().collect::<HashSet<_>>()) {
+            // --trust-all-tools takes precedence over --trust-tools=...
+            for tool in tool_config.values() {
+                if trusted.contains(&tool.name) {
+                    tool_permissions.trust_tool(&tool.name);
+                } else {
+                    tool_permissions.untrust_tool(&tool.name);
+                }
+            }
+        }
+
+        let mut chat = ChatContext::new(
+            ctx,
+            database,
+            &conversation_id,
+            output,
+            input,
+            InputSource::new(database, prompt_request_sender, prompt_response_receiver)?,
+            interactive,
+            self.resume,
+            client,
+            || terminal::window_size().map(|s| s.columns.into()).ok(),
+            tool_manager,
+            self.profile,
+            tool_config,
+            tool_permissions,
+        )
+        .await?;
+
+        let result = chat.try_chat(database, telemetry).await.map(|_| ExitCode::SUCCESS);
+        drop(chat); // Explicit drop for clarity
+
+        result
+    }
+}
 
 /// Help text for the compact command
 fn compact_help_text() -> String {
@@ -291,182 +475,6 @@ const TRUST_ALL_TEXT: &str = color_print::cstr! {"<green!>All tools are now trus
 const TOOL_BULLET: &str = " ● ";
 const CONTINUATION_LINE: &str = " ⋮ ";
 const PURPOSE_ARROW: &str = " ↳ ";
-
-pub async fn launch_chat(database: &mut Database, telemetry: &TelemetryThread, args: cli::Chat) -> Result<ExitCode> {
-    let trust_tools = args.trust_tools.map(|mut tools| {
-        if tools.len() == 1 && tools[0].is_empty() {
-            tools.pop();
-        }
-        tools
-    });
-
-    chat(
-        database,
-        telemetry,
-        args.input,
-        args.no_interactive,
-        args.resume,
-        args.accept_all,
-        args.profile,
-        args.trust_all_tools,
-        trust_tools,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-pub async fn chat(
-    database: &mut Database,
-    telemetry: &TelemetryThread,
-    input: Option<String>,
-    no_interactive: bool,
-    resume_conversation: bool,
-    accept_all: bool,
-    profile: Option<String>,
-    trust_all_tools: bool,
-    trust_tools: Option<Vec<String>>,
-) -> Result<ExitCode> {
-    if !crate::util::system_info::in_cloudshell() && !crate::auth::is_logged_in(database).await {
-        bail!(
-            "You are not logged in, please log in with {}",
-            format!("{CLI_BINARY_NAME} login").bold()
-        );
-    }
-
-    region_check("chat")?;
-
-    let ctx = Context::new();
-
-    let stdin = std::io::stdin();
-    // no_interactive flag or part of a pipe
-    let interactive = !no_interactive && stdin.is_terminal();
-    let input = if !interactive && !stdin.is_terminal() {
-        // append to input string any extra info that was provided, e.g. via pipe
-        let mut input = input.unwrap_or_default();
-        stdin.lock().read_to_string(&mut input)?;
-        Some(input)
-    } else {
-        input
-    };
-
-    let mut output = match interactive {
-        true => SharedWriter::stderr(),
-        false => SharedWriter::stdout(),
-    };
-
-    let client = match ctx.env().get("Q_MOCK_CHAT_RESPONSE") {
-        Ok(json) => create_stream(serde_json::from_str(std::fs::read_to_string(json)?.as_str())?),
-        _ => StreamingClient::new(database).await?,
-    };
-
-    let mcp_server_configs = match McpServerConfig::load_config(&mut output).await {
-        Ok(config) => {
-            if interactive && !database.settings.get_bool(Setting::McpLoadedBefore).unwrap_or(false) {
-                execute!(
-                    output,
-                    style::Print(
-                        "To learn more about MCP safety, see https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-mcp-security.html\n\n"
-                    )
-                )?;
-            }
-            database.settings.set(Setting::McpLoadedBefore, true).await?;
-            config
-        },
-        Err(e) => {
-            warn!("No mcp server config loaded: {}", e);
-            McpServerConfig::default()
-        },
-    };
-
-    // If profile is specified, verify it exists before starting the chat
-    if let Some(ref profile_name) = profile {
-        // Create a temporary context manager to check if the profile exists
-        match ContextManager::new(Arc::clone(&ctx), None).await {
-            Ok(context_manager) => {
-                let profiles = context_manager.list_profiles().await?;
-                if !profiles.contains(profile_name) {
-                    bail!(
-                        "Profile '{}' does not exist. Available profiles: {}",
-                        profile_name,
-                        profiles.join(", ")
-                    );
-                }
-            },
-            Err(e) => {
-                warn!("Failed to initialize context manager to verify profile: {}", e);
-                // Continue without verification if context manager can't be initialized
-            },
-        }
-    }
-
-    let conversation_id = Alphanumeric.sample_string(&mut rand::rng(), 9);
-    info!(?conversation_id, "Generated new conversation id");
-    let (prompt_request_sender, prompt_request_receiver) = std::sync::mpsc::channel::<Option<String>>();
-    let (prompt_response_sender, prompt_response_receiver) = std::sync::mpsc::channel::<Vec<String>>();
-    let tool_manager_output: Box<dyn Write + Send + Sync + 'static> = if interactive {
-        Box::new(output.clone())
-    } else {
-        Box::new(NullWriter {})
-    };
-    let mut tool_manager = ToolManagerBuilder::default()
-        .mcp_server_config(mcp_server_configs)
-        .prompt_list_sender(prompt_response_sender)
-        .prompt_list_receiver(prompt_request_receiver)
-        .conversation_id(&conversation_id)
-        .interactive(interactive)
-        .build(telemetry, tool_manager_output)
-        .await?;
-    let tool_config = tool_manager.load_tools(database, &mut output).await?;
-    let mut tool_permissions = ToolPermissions::new(tool_config.len());
-    if accept_all || trust_all_tools {
-        tool_permissions.trust_all = true;
-        for tool in tool_config.values() {
-            tool_permissions.trust_tool(&tool.name);
-        }
-
-        // Deprecation notice for --accept-all users
-        if accept_all && interactive {
-            queue!(
-                output,
-                style::SetForegroundColor(Color::Yellow),
-                style::Print("\n--accept-all, -a is deprecated. Use --trust-all-tools instead."),
-                style::SetForegroundColor(Color::Reset),
-            )?;
-        }
-    } else if let Some(trusted) = trust_tools.map(|vec| vec.into_iter().collect::<HashSet<_>>()) {
-        // --trust-all-tools takes precedence over --trust-tools=...
-        for tool in tool_config.values() {
-            if trusted.contains(&tool.name) {
-                tool_permissions.trust_tool(&tool.name);
-            } else {
-                tool_permissions.untrust_tool(&tool.name);
-            }
-        }
-    }
-
-    let mut chat = ChatContext::new(
-        ctx,
-        database,
-        &conversation_id,
-        output,
-        input,
-        InputSource::new(database, prompt_request_sender, prompt_response_receiver)?,
-        interactive,
-        resume_conversation,
-        client,
-        || terminal::window_size().map(|s| s.columns.into()).ok(),
-        tool_manager,
-        profile,
-        tool_config,
-        tool_permissions,
-    )
-    .await?;
-
-    let result = chat.try_chat(database, telemetry).await.map(|_| ExitCode::SUCCESS);
-    drop(chat); // Explicit drop for clarity
-
-    result
-}
 
 /// Enum used to denote the origin of a tool use event
 enum ToolUseStatus {
@@ -843,7 +851,7 @@ impl ChatContext {
                 } => {
                     let tool_uses_clone = tool_uses.clone();
                     tokio::select! {
-                        res = self.handle_input(telemetry, input, tool_uses, pending_tool_index) => res,
+                        res = self.handle_input(telemetry, database, input, tool_uses, pending_tool_index) => res,
                         Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: tool_uses_clone })
                     }
                 },
@@ -856,7 +864,7 @@ impl ChatContext {
                 } => {
                     let tool_uses_clone = tool_uses.clone();
                     tokio::select! {
-                        res = self.compact_history(telemetry, tool_uses, pending_tool_index, prompt, show_summary, help) => res,
+                        res = self.compact_history(telemetry, database, tool_uses, pending_tool_index, prompt, show_summary, help) => res,
                         Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: tool_uses_clone })
                     }
                 },
@@ -875,12 +883,16 @@ impl ChatContext {
                 },
                 ChatState::HandleResponseStream(response) => tokio::select! {
                     res = self.handle_response(database, telemetry, response) => res,
-                    Ok(_) = ctrl_c_stream => Err(ChatError::Interrupted { tool_uses: None })
+                    Ok(_) = ctrl_c_stream => {
+                        self.send_chat_telemetry(database, telemetry, None, TelemetryResult::Cancelled, None).await;
+
+                        Err(ChatError::Interrupted { tool_uses: None })
+                    }
                 },
                 ChatState::Exit => return Ok(()),
             };
 
-            next_state = Some(self.handle_state_execution_result(database, result).await?);
+            next_state = Some(self.handle_state_execution_result(telemetry, database, result).await?);
         }
     }
 
@@ -888,6 +900,7 @@ impl ChatContext {
     /// to.
     async fn handle_state_execution_result(
         &mut self,
+        telemetry: &TelemetryThread,
         database: &mut Database,
         result: Result<ChatState, ChatError>,
     ) -> Result<ChatState, ChatError> {
@@ -896,6 +909,9 @@ impl ChatContext {
         match result {
             Ok(state) => Ok(state),
             Err(e) => {
+                self.send_error_telemetry(database, telemetry, get_error_string(&e))
+                    .await;
+
                 macro_rules! print_err {
                     ($prepend_msg:expr, $err:expr) => {{
                         queue!(
@@ -1027,9 +1043,11 @@ impl ChatContext {
     /// model.
     ///
     /// The last two user messages in the history are not included in the compaction process.
+    #[allow(clippy::too_many_arguments)]
     async fn compact_history(
         &mut self,
         telemetry: &TelemetryThread,
+        database: &mut Database,
         tool_uses: Option<Vec<QueuedTool>>,
         pending_tool_index: Option<usize>,
         custom_prompt: Option<String>,
@@ -1085,32 +1103,43 @@ impl ChatContext {
         // retry except with less context included.
         let response = match response {
             Ok(res) => res,
-            Err(e) => match e {
-                crate::api_client::ApiClientError::ContextWindowOverflow => {
-                    self.conversation_state.clear(true);
-                    if self.interactive {
-                        self.spinner.take();
-                        execute!(
-                            self.output,
-                            terminal::Clear(terminal::ClearType::CurrentLine),
-                            cursor::MoveToColumn(0),
-                            style::SetForegroundColor(Color::Yellow),
-                            style::Print(
-                                "The context window usage has overflowed. Clearing the conversation history.\n\n"
-                            ),
-                            style::SetAttribute(Attribute::Reset)
-                        )?;
-                    }
-                    return Ok(ChatState::PromptUser {
-                        tool_uses,
-                        pending_tool_index,
-                        skip_printing_tools: true,
-                    });
-                },
-                e => return Err(e.into()),
+            Err(e) => {
+                self.send_chat_telemetry(
+                    database,
+                    telemetry,
+                    None,
+                    TelemetryResult::Failed,
+                    Some(get_error_string(&e)),
+                )
+                .await;
+                match e {
+                    crate::api_client::ApiClientError::ContextWindowOverflow => {
+                        self.conversation_state.clear(true);
+                        if self.interactive {
+                            self.spinner.take();
+                            execute!(
+                                self.output,
+                                terminal::Clear(terminal::ClearType::CurrentLine),
+                                cursor::MoveToColumn(0),
+                                style::SetForegroundColor(Color::Yellow),
+                                style::Print(
+                                    "The context window usage has overflowed. Clearing the conversation history.\n\n"
+                                ),
+                                style::SetAttribute(Attribute::Reset)
+                            )?;
+                        }
+                        return Ok(ChatState::PromptUser {
+                            tool_uses,
+                            pending_tool_index,
+                            skip_printing_tools: true,
+                        });
+                    },
+                    e => return Err(e.into()),
+                }
             },
         };
 
+        let request_id = response.request_id().map(|s| s.to_string());
         let summary = {
             let mut parser = ResponseParser::new(response);
             loop {
@@ -1123,6 +1152,14 @@ impl ChatContext {
                         if let Some(request_id) = &err.request_id {
                             self.failed_request_ids.push(request_id.clone());
                         };
+                        self.send_chat_telemetry(
+                            database,
+                            telemetry,
+                            err.request_id.clone(),
+                            TelemetryResult::Failed,
+                            Some(get_error_string(&err)),
+                        )
+                        .await;
                         return Err(err.into());
                     },
                 }
@@ -1138,16 +1175,8 @@ impl ChatContext {
                 cursor::Show
             )?;
         }
-
-        if let Some(message_id) = self.conversation_state.message_id() {
-            telemetry
-                .send_chat_added_message(
-                    self.conversation_state.conversation_id().to_owned(),
-                    message_id.to_owned(),
-                    self.conversation_state.context_message_length(),
-                )
-                .ok();
-        }
+        self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None)
+            .await;
 
         self.conversation_state.replace_history_with_summary(summary.clone());
 
@@ -1308,6 +1337,7 @@ impl ChatContext {
     async fn handle_input(
         &mut self,
         telemetry: &TelemetryThread,
+        database: &mut Database,
         mut user_input: String,
         tool_uses: Option<Vec<QueuedTool>>,
         pending_tool_index: Option<usize>,
@@ -1440,6 +1470,7 @@ impl ChatContext {
             } => {
                 self.compact_history(
                     telemetry,
+                    database,
                     Some(tool_uses),
                     pending_tool_index,
                     prompt,
@@ -3261,6 +3292,15 @@ impl ChatContext {
                         self.failed_request_ids.push(request_id.clone());
                     };
 
+                    self.send_chat_telemetry(
+                        database,
+                        telemetry,
+                        recv_error.request_id.clone(),
+                        TelemetryResult::Failed,
+                        Some(get_error_string(&recv_error)),
+                    )
+                    .await;
+
                     match recv_error.source {
                         RecvErrorKind::StreamTimeout { source, duration } => {
                             error!(
@@ -3385,7 +3425,7 @@ impl ChatContext {
 
                 // TODO: We should buffer output based on how much we have to parse, not as a constant
                 // Do not remove unless you are nabochay :)
-                std::thread::sleep(Duration::from_millis(8));
+                tokio::time::sleep(Duration::from_millis(8)).await;
             }
 
             // Set spinner after showing all of the assistant text content so far.
@@ -3395,15 +3435,8 @@ impl ChatContext {
             }
 
             if ended {
-                if let Some(message_id) = self.conversation_state.message_id() {
-                    telemetry
-                        .send_chat_added_message(
-                            self.conversation_state.conversation_id().to_owned(),
-                            message_id.to_owned(),
-                            self.conversation_state.context_message_length(),
-                        )
-                        .ok();
-                }
+                self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None)
+                    .await;
 
                 if self.interactive
                     && database
@@ -3691,6 +3724,41 @@ impl ChatContext {
 
         Ok(())
     }
+
+    async fn send_chat_telemetry(
+        &self,
+        database: &Database,
+        telemetry: &TelemetryThread,
+        request_id: Option<String>,
+        result: TelemetryResult,
+        reason: Option<String>,
+    ) {
+        telemetry
+            .send_chat_added_message(
+                database,
+                self.conversation_state.conversation_id().to_owned(),
+                self.conversation_state.message_id().map(|s| s.to_owned()),
+                request_id,
+                self.conversation_state.context_message_length(),
+                result,
+                reason,
+            )
+            .await
+            .ok();
+    }
+
+    async fn send_error_telemetry(&self, database: &Database, telemetry: &TelemetryThread, reason: String) {
+        telemetry
+            .send_response_error(
+                database,
+                self.conversation_state.conversation_id().to_owned(),
+                self.conversation_state.context_message_length(),
+                TelemetryResult::Failed,
+                Some(reason),
+            )
+            .await
+            .ok();
+    }
 }
 
 /// Prints hook configuration grouped by trigger: conversation session start or per user message
@@ -3787,6 +3855,22 @@ fn create_stream(model_responses: serde_json::Value) -> StreamingClient {
         mock.push(stream);
     }
     StreamingClient::mock(mock)
+}
+
+/// Returns surface error + root cause as a string. If there is only one error
+/// in the chain, return that as a string.
+fn get_error_string(error: &(dyn Error + 'static)) -> String {
+    let err_chain = Chain::new(error);
+
+    if err_chain.len() > 1 {
+        format!(
+            "'{}' caused by: {}",
+            error,
+            err_chain.last().map_or("UNKNOWN".to_string(), |e| e.to_string())
+        )
+    } else {
+        error.to_string()
+    }
 }
 
 #[cfg(test)]
