@@ -4,6 +4,7 @@ mod diagnostics;
 mod feed;
 mod issue;
 mod mcp;
+mod persona;
 mod settings;
 mod user;
 
