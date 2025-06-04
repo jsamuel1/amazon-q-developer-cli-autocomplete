@@ -3887,6 +3887,7 @@ impl ChatContext {
         result: TelemetryResult,
         reason: Option<String>,
         reason_desc: Option<String>,
+        model: Option<String>,
     ) {
         telemetry
             .send_chat_added_message(
@@ -3898,6 +3899,7 @@ impl ChatContext {
                 result,
                 reason,
                 reason_desc,
+                model,
             )
             .await
             .ok();
