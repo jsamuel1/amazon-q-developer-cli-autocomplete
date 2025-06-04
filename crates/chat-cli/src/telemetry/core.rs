@@ -110,7 +110,7 @@ impl Event {
                     credential_start_url: self.credential_start_url.map(Into::into),
                     amazonq_conversation_id: Some(conversation_id.into()),
                     codewhispererterminal_in_cloudshell: None,
-                    codewhispererterminal_model: model,
+                    codewhispererterminal_model: model.map(Into::into),
                 }
                 .into_metric_datum(),
             ),
@@ -121,7 +121,7 @@ impl Event {
                     credential_start_url: self.credential_start_url.map(Into::into),
                     amazonq_conversation_id: Some(conversation_id.into()),
                     codewhispererterminal_in_cloudshell: None,
-                    codewhispererterminal_model: model,
+                    codewhispererterminal_model: model.map(Into::into),
                 }
                 .into_metric_datum(),
             ),
@@ -133,6 +133,7 @@ impl Event {
                 result,
                 reason,
                 reason_desc,
+                model,
                 ..
             } => Some(
                 CodewhispererterminalAddChatMessage {
@@ -148,7 +149,7 @@ impl Event {
                     result: result.to_string().into(),
                     reason: reason.map(Into::into),
                     reason_desc: reason_desc.map(Into::into),
-                    codewhispererterminal_model: model,
+                    codewhispererterminal_model: model.map(Into::into),
                 }
                 .into_metric_datum(),
             ),
@@ -186,7 +187,7 @@ impl Event {
                         .map(|s| CodewhispererterminalCustomToolOutputTokenSize(s as i64)),
                     codewhispererterminal_custom_tool_latency: custom_tool_call_latency
                         .map(|l| CodewhispererterminalCustomToolLatency(l as i64)),
-                    codewhispererterminal_model: model,
+                    codewhispererterminal_model: model.map(Into::into),
                 }
                 .into_metric_datum(),
             ),
@@ -356,11 +357,11 @@ pub struct ToolUseEventBuilder {
     pub input_token_size: Option<usize>,
     pub output_token_size: Option<usize>,
     pub custom_tool_call_latency: Option<usize>,
-    pub model: String,
+    pub model: Option<String>,
 }
 
 impl ToolUseEventBuilder {
-    pub fn new(conv_id: String, tool_use_id: String, model: String) -> Self {
+    pub fn new(conv_id: String, tool_use_id: String, model: Option<String>) -> Self {
         Self {
             conversation_id: conv_id,
             utterance_id: None,

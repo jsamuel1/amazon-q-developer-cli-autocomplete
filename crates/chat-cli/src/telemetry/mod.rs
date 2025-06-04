@@ -227,7 +227,7 @@ impl TelemetryThread {
             input_token_size: event.input_token_size,
             output_token_size: event.output_token_size,
             custom_tool_call_latency: event.custom_tool_call_latency,
-            model: Some(event.model),
+            model: event.model,
         }))?)
     }
 
