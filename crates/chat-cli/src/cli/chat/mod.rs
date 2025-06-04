@@ -406,7 +406,7 @@ const SMALL_SCREEN_WELCOME_TEXT: &str = color_print::cstr! {"<em>Welcome to <cya
 const RESUME_TEXT: &str = color_print::cstr! {"<em>Picking up where we left off...</em>"};
 
 // Only show the model-related tip for now to make users aware of this feature.
-const ROTATING_TIPS: [&str; 2] = [
+const ROTATING_TIPS: [&str; 1] = [
     // color_print::cstr! {"You can resume the last conversation from your current directory by launching with
     // <green!>q chat --resume</green!>"}, color_print::cstr! {"Get notified whenever Q CLI finishes responding.
     // Just run <green!>q settings chat.enableNotifications true</green!>"}, color_print::cstr! {"You can use
@@ -425,7 +425,7 @@ const ROTATING_TIPS: [&str; 2] = [
     // int}</green!>. Servers that takes longer than the specified time will continue to load in the background. Use
     // /tools to see pending servers."}, color_print::cstr! {"You can see the server load status as well as any
     // warnings or errors associated with <green!>/mcp</green!>"},
-    color_print::cstr! {"Use <green!>/model</green!> to select the model to use for this conversation"},
+    // color_print::cstr! {"Use <green!>/model</green!> to select the model to use for this conversation"},
     color_print::cstr! {"Set a default model by running <green!>q settings chat.defaultModel MODEL</green!>. Run <green!>/model</green!> to learn more."},
 ];
 
