@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::borrow::Borrow;
 use std::collections::{
     HashMap,
     HashSet,
@@ -23,10 +24,34 @@ use tokio::fs::ReadDir;
 pub type McpServerName = String;
 pub type HookName = String;
 
+pub(crate) enum PermissionEvalResult {
+    Allow,
+    Deny,
+    Ask,
+}
+
+/// To be implemented by tools
+/// The intended workflow here is to utilize to the visitor pattern
+/// - [ToolPermissions] accepts a PermissionCandidate
+/// - it then passes a reference of itself to [PermissionCandidate::eval]
+/// - it is then expected to look through the permissions hashmap to conclude
+pub(crate) trait PermissionCandidate {
+    fn eval(&self, tool_permissions: &ToolPermissions) -> PermissionEvalResult;
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq, Hash)]
-pub enum PermissionSubject {
+pub(crate) enum PermissionSubject {
     All,
     ExactName(String),
+}
+
+impl Borrow<str> for PermissionSubject {
+    fn borrow(&self) -> &str {
+        match self {
+            PermissionSubject::All => "*",
+            PermissionSubject::ExactName(name) => name.as_str(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for PermissionSubject {
@@ -45,14 +70,14 @@ impl<'de> Deserialize<'de> for PermissionSubject {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Hook {
+pub(crate) struct Hook {
     trigger: Trigger,
     command: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Trigger {
+pub(crate) enum Trigger {
     PerPrompt,
     ConversationStart,
 }
@@ -65,7 +90,7 @@ pub enum Trigger {
 /// or commands.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase", untagged)]
-pub enum ToolPermission {
+pub(crate) enum ToolPermission {
     /// Can be executed without asking for permission
     AlwaysAllow,
     /// Cannot be executed
@@ -146,20 +171,26 @@ impl<'de> Deserialize<'de> for ToolPermission {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolPermissions {
+pub(crate) struct ToolPermissions {
     #[serde(rename = "builtIn")]
-    built_in: HashMap<String, ToolPermission>,
+    pub built_in: HashMap<PermissionSubject, ToolPermission>,
     #[serde(flatten)]
-    custom: HashMap<String, HashMap<String, ToolPermission>>,
+    pub custom: HashMap<PermissionSubject, HashMap<PermissionSubject, ToolPermission>>,
 }
 
 impl Default for ToolPermissions {
     fn default() -> Self {
         Self {
             built_in: {
-                let mut perms = HashMap::<String, ToolPermission>::new();
-                perms.insert("fs_read".to_string(), ToolPermission::AlwaysAllow);
-                perms.insert("report_issue".to_string(), ToolPermission::AlwaysAllow);
+                let mut perms = HashMap::<PermissionSubject, ToolPermission>::new();
+                perms.insert(
+                    PermissionSubject::ExactName("fs_read".to_string()),
+                    ToolPermission::AlwaysAllow,
+                );
+                perms.insert(
+                    PermissionSubject::ExactName("report_issue".to_string()),
+                    ToolPermission::AlwaysAllow,
+                );
                 perms
             },
             custom: Default::default(),
@@ -167,11 +198,15 @@ impl Default for ToolPermissions {
     }
 }
 
-impl ToolPermissions {}
+impl ToolPermissions {
+    pub fn evaluate(&self, candidate: &impl PermissionCandidate) -> PermissionEvalResult {
+        candidate.eval(self)
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Context {
+pub(crate) struct Context {
     files: Vec<PathBuf>,
     hooks: HashMap<HookName, Hook>,
 }
@@ -191,7 +226,7 @@ impl Default for Context {
 }
 
 #[derive(Default, Debug, Serialize)]
-pub enum McpServerList {
+pub(crate) enum McpServerList {
     #[default]
     All,
     List(Vec<McpServerName>),
@@ -238,13 +273,13 @@ impl<'de> Deserialize<'de> for McpServerList {
 
 #[derive(Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PersonaConfig {
+pub(crate) struct PersonaConfig {
     mcp_servers: McpServerList,
     tool_perms: ToolPermissions,
     context: Context,
 }
 
-pub enum Persona {
+pub(crate) enum Persona {
     Local {
         path: PathBuf,
         name: String,
@@ -449,11 +484,31 @@ mod tests {
         assert!(servers.contains(&"git"));
 
         let perms = &persona_config.tool_perms;
-        assert!(perms.built_in.contains_key("fs_read"));
-        assert!(perms.built_in.contains_key("use_aws"));
-        assert!(perms.built_in.contains_key("execute_bash"));
-        assert!(perms.custom.contains_key("git"));
-        assert!(perms.custom.contains_key("fetch"));
+        assert!(
+            perms
+                .built_in
+                .contains_key(&PermissionSubject::ExactName("fs_read".to_string()))
+        );
+        assert!(
+            perms
+                .built_in
+                .contains_key(&PermissionSubject::ExactName("use_aws".to_string()))
+        );
+        assert!(
+            perms
+                .built_in
+                .contains_key(&PermissionSubject::ExactName("execute_bash".to_string()))
+        );
+        assert!(
+            perms
+                .custom
+                .contains_key(&PermissionSubject::ExactName("git".to_string()))
+        );
+        assert!(
+            perms
+                .custom
+                .contains_key(&PermissionSubject::ExactName("fetch".to_string()))
+        );
 
         let context = &persona_config.context;
         assert!(context.files.len() == 1);

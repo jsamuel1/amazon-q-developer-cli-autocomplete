@@ -33,6 +33,10 @@ use crate::cli::chat::util::images::{
     is_supported_image_type,
     pre_process,
 };
+use crate::cli::persona::{
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::platform::Context;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +73,24 @@ impl FsRead {
             FsRead::Directory(fs_directory) => fs_directory.invoke(ctx, updates).await,
             FsRead::Search(fs_search) => fs_search.invoke(ctx, updates).await,
             FsRead::Image(fs_image) => fs_image.invoke(ctx, updates).await,
+        }
+    }
+}
+
+impl PermissionCandidate for FsRead {
+    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
+        use crate::cli::persona::ToolPermission;
+
+        let Some(perm) = tool_permissions.built_in.get("fs_read") else {
+            return PermissionEvalResult::Ask;
+        };
+
+        match perm {
+            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
+            ToolPermission::Deny => PermissionEvalResult::Deny,
+            ToolPermission::DetailedList { always_allow, deny } => {
+                todo!()
+            },
         }
     }
 }
