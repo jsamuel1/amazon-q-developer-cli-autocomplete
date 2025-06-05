@@ -6,6 +6,7 @@ use std::collections::{
     HashSet,
 };
 use std::ffi::OsStr;
+use std::hash::Hash;
 use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -39,10 +40,22 @@ pub(crate) trait PermissionCandidate {
     fn eval(&self, tool_permissions: &ToolPermissions) -> PermissionEvalResult;
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Serialize, Eq)]
 pub(crate) enum PermissionSubject {
     All,
     ExactName(String),
+}
+
+impl PartialEq for PermissionSubject {
+    fn eq(&self, other: &Self) -> bool {
+        <Self as Borrow<str>>::borrow(self) == <Self as Borrow<str>>::borrow(other)
+    }
+}
+
+impl Hash for PermissionSubject {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        <Self as Borrow<str>>::borrow(self).hash(state);
+    }
 }
 
 impl Borrow<str> for PermissionSubject {
@@ -80,6 +93,12 @@ pub(crate) struct Hook {
 pub(crate) enum Trigger {
     PerPrompt,
     ConversationStart,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) enum DetailedListArgs {
+    GlobSet(),
+    Command(String),
 }
 
 /// Represents the permission level for a tool execution.
@@ -484,31 +503,11 @@ mod tests {
         assert!(servers.contains(&"git"));
 
         let perms = &persona_config.tool_perms;
-        assert!(
-            perms
-                .built_in
-                .contains_key(&PermissionSubject::ExactName("fs_read".to_string()))
-        );
-        assert!(
-            perms
-                .built_in
-                .contains_key(&PermissionSubject::ExactName("use_aws".to_string()))
-        );
-        assert!(
-            perms
-                .built_in
-                .contains_key(&PermissionSubject::ExactName("execute_bash".to_string()))
-        );
-        assert!(
-            perms
-                .custom
-                .contains_key(&PermissionSubject::ExactName("git".to_string()))
-        );
-        assert!(
-            perms
-                .custom
-                .contains_key(&PermissionSubject::ExactName("fetch".to_string()))
-        );
+        assert!(perms.built_in.contains_key("fs_read"));
+        assert!(perms.built_in.contains_key("use_aws"));
+        assert!(perms.built_in.contains_key("execute_bash"));
+        assert!(perms.custom.contains_key("git"));
+        assert!(perms.custom.contains_key("fetch"));
 
         let context = &persona_config.context;
         assert!(context.files.len() == 1);

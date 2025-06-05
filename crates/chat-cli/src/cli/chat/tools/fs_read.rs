@@ -82,16 +82,21 @@ impl PermissionCandidate for FsRead {
         use crate::cli::persona::ToolPermission;
 
         let Some(perm) = tool_permissions.built_in.get("fs_read") else {
-            return PermissionEvalResult::Ask;
+            // By default, we always allow read only operations.
+            return PermissionEvalResult::Allow;
         };
 
-        match perm {
-            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
-            ToolPermission::Deny => PermissionEvalResult::Deny,
-            ToolPermission::DetailedList { always_allow, deny } => {
-                todo!()
-            },
-        }
+        todo!()
+        // match perm {
+        //     ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
+        //     ToolPermission::Deny => PermissionEvalResult::Deny,
+        //     ToolPermission::DetailedList { always_allow, deny } => match self {
+        //         Self::Line(fs_line) => {},
+        //         Self::Directory(fs_dir) => {},
+        //         Self::Search(fs_search) => {},
+        //         Self::Image(fs_image) => {},
+        //     },
+        // }
     }
 }
 
