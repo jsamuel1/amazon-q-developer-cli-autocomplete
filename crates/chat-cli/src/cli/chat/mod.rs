@@ -8,6 +8,7 @@ mod message;
 mod parse;
 mod parser;
 mod prompt;
+mod prompt_parser;
 mod server_messenger;
 #[cfg(unix)]
 mod skim_integration;
@@ -22,7 +23,6 @@ use std::collections::{
     HashSet,
     VecDeque,
 };
-use std::error::Error;
 use std::io::{
     IsTerminal,
     Read,
@@ -71,7 +71,6 @@ use dialoguer::{
     Select,
 };
 use eyre::{
-    Chain,
     ErrReport,
     Result,
     bail,
@@ -163,8 +162,10 @@ use crate::mcp_client::{
 use crate::platform::Context;
 use crate::telemetry::core::ToolUseEventBuilder;
 use crate::telemetry::{
+    ReasonCode,
     TelemetryResult,
     TelemetryThread,
+    get_error_reason,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
@@ -406,7 +407,7 @@ const SMALL_SCREEN_WELCOME_TEXT: &str = color_print::cstr! {"<em>Welcome to <cya
 const RESUME_TEXT: &str = color_print::cstr! {"<em>Picking up where we left off...</em>"};
 
 // Only show the model-related tip for now to make users aware of this feature.
-const ROTATING_TIPS: [&str; 1] = [
+const ROTATING_TIPS: [&str; 2] = [
     // color_print::cstr! {"You can resume the last conversation from your current directory by launching with
     // <green!>q chat --resume</green!>"}, color_print::cstr! {"Get notified whenever Q CLI finishes responding.
     // Just run <green!>q settings chat.enableNotifications true</green!>"}, color_print::cstr! {"You can use
@@ -425,7 +426,7 @@ const ROTATING_TIPS: [&str; 1] = [
     // int}</green!>. Servers that takes longer than the specified time will continue to load in the background. Use
     // /tools to see pending servers."}, color_print::cstr! {"You can see the server load status as well as any
     // warnings or errors associated with <green!>/mcp</green!>"},
-    // color_print::cstr! {"Use <green!>/model</green!> to select the model to use for this conversation"},
+    color_print::cstr! {"Use <green!>/model</green!> to select the model to use for this conversation"},
     color_print::cstr! {"Set a default model by running <green!>q settings chat.defaultModel MODEL</green!>. Run <green!>/model</green!> to learn more."},
 ];
 
@@ -435,18 +436,17 @@ pub struct ModelOption {
 }
 
 pub const MODEL_OPTIONS: [ModelOption; 3] = [
-    // ModelOption { name: "Auto", model_id: "CLAUDE_3_5_SONNET_20241022_V2_0" },
     ModelOption {
-        name: "claude-3.5-sonnet",
-        model_id: "CLAUDE_3_5_SONNET_20241022_V2_0",
+        name: "claude-4-sonnet",
+        model_id: "CLAUDE_SONNET_4_20250514_V1_0",
     },
     ModelOption {
         name: "claude-3.7-sonnet",
         model_id: "CLAUDE_3_7_SONNET_20250219_V1_0",
     },
     ModelOption {
-        name: "claude-4-sonnet",
-        model_id: "CLAUDE_SONNET_4_20250514_V1_0",
+        name: "claude-3.5-sonnet",
+        model_id: "CLAUDE_3_5_SONNET_20241022_V2_0",
     },
 ];
 
@@ -555,6 +555,21 @@ pub enum ChatError {
     NonInteractiveToolApproval,
     #[error(transparent)]
     GetPromptError(#[from] GetPromptError),
+}
+
+impl ReasonCode for ChatError {
+    fn reason_code(&self) -> String {
+        match self {
+            ChatError::Client(e) => e.reason_code(),
+            ChatError::ResponseStream(e) => e.reason_code(),
+            ChatError::Std(_) => "StdIoError".to_string(),
+            ChatError::Readline(_) => "ReadlineError".to_string(),
+            ChatError::Custom(_) => "GenericError".to_string(),
+            ChatError::Interrupted { .. } => "Interrupted".to_string(),
+            ChatError::NonInteractiveToolApproval => "NonInteractiveToolApprovalError".to_string(),
+            ChatError::GetPromptError(_) => "GetPromptError".to_string(),
+        }
+    }
 }
 
 pub struct ChatContext {
@@ -824,9 +839,7 @@ impl ChatContext {
 
             execute!(self.output, style::Print(welcome_text), style::Print("\n\n"),)?;
 
-            let current_tip_index = database.get_increment_rotating_tip().unwrap_or(0) % ROTATING_TIPS.len();
-
-            let tip = ROTATING_TIPS[current_tip_index];
+            let tip = ROTATING_TIPS[usize::try_from(rand::random::<u32>()).unwrap_or(0) % ROTATING_TIPS.len()];
             if is_small_screen {
                 // If the screen is small, print the tip in a single line
                 execute!(
@@ -880,7 +893,7 @@ impl ChatContext {
         });
 
         if self.interactive {
-            if let Some(ref id) = self.conversation_state.current_model_id {
+            if let Some(ref id) = self.conversation_state.model {
                 if let Some(model_option) = MODEL_OPTIONS.iter().find(|option| option.model_id == *id) {
                     execute!(
                         self.output,
@@ -964,7 +977,7 @@ impl ChatContext {
                 ChatState::HandleResponseStream(response) => tokio::select! {
                     res = self.handle_response(database, telemetry, response) => res,
                     Ok(_) = ctrl_c_stream => {
-                        self.send_chat_telemetry(database, telemetry, None, TelemetryResult::Cancelled, None).await;
+                        self.send_chat_telemetry(database, telemetry, None, TelemetryResult::Cancelled, None, None).await;
 
                         Err(ChatError::Interrupted { tool_uses: None })
                     }
@@ -989,7 +1002,8 @@ impl ChatContext {
         match result {
             Ok(state) => Ok(state),
             Err(e) => {
-                self.send_error_telemetry(database, telemetry, get_error_string(&e))
+                let (reason, reason_desc) = get_error_reason(&e);
+                self.send_error_telemetry(database, telemetry, reason, Some(reason_desc))
                     .await;
 
                 macro_rules! print_err {
@@ -1208,12 +1222,14 @@ impl ChatContext {
         let response = match response {
             Ok(res) => res,
             Err(e) => {
+                let (reason, reason_desc) = get_error_reason(&e);
                 self.send_chat_telemetry(
                     database,
                     telemetry,
                     None,
                     TelemetryResult::Failed,
-                    Some(get_error_string(&e)),
+                    Some(reason),
+                    Some(reason_desc),
                 )
                 .await;
                 match e {
@@ -1256,12 +1272,14 @@ impl ChatContext {
                         if let Some(request_id) = &err.request_id {
                             self.failed_request_ids.push(request_id.clone());
                         };
+                        let (reason, reason_desc) = get_error_reason(&err);
                         self.send_chat_telemetry(
                             database,
                             telemetry,
                             err.request_id.clone(),
                             TelemetryResult::Failed,
-                            Some(get_error_string(&err)),
+                            Some(reason),
+                            Some(reason_desc),
                         )
                         .await;
                         return Err(err.into());
@@ -1279,7 +1297,8 @@ impl ChatContext {
                 cursor::Show
             )?;
         }
-        self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None)
+
+        self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None, None)
             .await;
 
         self.conversation_state.replace_history_with_summary(summary.clone());
@@ -1360,7 +1379,7 @@ impl ChatContext {
     /// Read input from the user.
     async fn prompt_user(
         &mut self,
-        database: &Database,
+        #[cfg_attr(windows, allow(unused_variables))] database: &Database,
         mut tool_uses: Option<Vec<QueuedTool>>,
         pending_tool_index: Option<usize>,
         skip_printing_tools: bool,
@@ -1514,8 +1533,36 @@ impl ChatContext {
             },
             Command::Execute { command } => {
                 queue!(self.output, style::Print('\n'))?;
-                std::process::Command::new("bash").args(["-c", &command]).status().ok();
-                queue!(self.output, style::Print('\n'))?;
+
+                // Use platform-appropriate shell
+                let result = if cfg!(target_os = "windows") {
+                    std::process::Command::new("cmd").args(["/C", &command]).status()
+                } else {
+                    std::process::Command::new("bash").args(["-c", &command]).status()
+                };
+
+                // Handle the result and provide appropriate feedback
+                match result {
+                    Ok(status) => {
+                        if !status.success() {
+                            queue!(
+                                self.output,
+                                style::SetForegroundColor(Color::Yellow),
+                                style::Print(format!("Command exited with status: {}\n", status)),
+                                style::SetForegroundColor(Color::Reset)
+                            )?;
+                        }
+                    },
+                    Err(e) => {
+                        queue!(
+                            self.output,
+                            style::SetForegroundColor(Color::Red),
+                            style::Print(format!("Failed to execute command: {}\n", e)),
+                            style::SetForegroundColor(Color::Reset)
+                        )?;
+                    },
+                }
+
                 ChatState::PromptUser {
                     tool_uses: None,
                     pending_tool_index: None,
@@ -3136,7 +3183,7 @@ impl ChatContext {
             },
             Command::Model => {
                 queue!(self.output, style::Print("\n"))?;
-                let active_model_id = self.conversation_state.current_model_id.as_deref();
+                let active_model_id = self.conversation_state.model.as_deref();
                 let labels: Vec<String> = MODEL_OPTIONS
                     .iter()
                     .map(|opt| {
@@ -3149,14 +3196,11 @@ impl ChatContext {
                         }
                     })
                     .collect();
-                let default_index = MODEL_OPTIONS
-                    .iter()
-                    .position(|opt| Some(opt.model_id) == active_model_id)
-                    .unwrap_or(0);
+
                 let selection: Option<_> = match Select::with_theme(&crate::util::dialoguer_theme())
                     .with_prompt("Select a model for this chat session")
                     .items(&labels)
-                    .default(default_index)
+                    .default(0)
                     .interact_on_opt(&dialoguer::console::Term::stdout())
                 {
                     Ok(sel) => {
@@ -3176,14 +3220,12 @@ impl ChatContext {
                 if let Some(index) = selection {
                     let selected = &MODEL_OPTIONS[index];
                     let model_id_str = selected.model_id.to_string();
-                    self.conversation_state.current_model_id = Some(model_id_str.clone());
-                    telemetry.update_model_id(Some(model_id_str.clone()));
-                    // let _ = database.set_last_used_model_id(model_id_str);
+                    self.conversation_state.model = Some(model_id_str);
 
                     queue!(
                         self.output,
                         style::Print("\n"),
-                        style::Print(format!(" Switched model to {}\n\n", selected.name)),
+                        style::Print(format!(" Using {}\n\n", selected.name)),
                         style::ResetColor,
                         style::SetForegroundColor(Color::Reset),
                         style::SetBackgroundColor(Color::Reset),
@@ -3449,12 +3491,14 @@ impl ChatContext {
                         self.failed_request_ids.push(request_id.clone());
                     };
 
+                    let (reason, reason_desc) = get_error_reason(&recv_error);
                     self.send_chat_telemetry(
                         database,
                         telemetry,
                         recv_error.request_id.clone(),
                         TelemetryResult::Failed,
-                        Some(get_error_string(&recv_error)),
+                        Some(reason),
+                        Some(reason_desc),
                     )
                     .await;
 
@@ -3566,7 +3610,7 @@ impl ChatContext {
             }
 
             if ended {
-                self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None)
+                self.send_chat_telemetry(database, telemetry, request_id, TelemetryResult::Succeeded, None, None)
                     .await;
 
                 if self.interactive
@@ -3624,10 +3668,14 @@ impl ChatContext {
         for tool_use in tool_uses {
             let tool_use_id = tool_use.id.clone();
             let tool_use_name = tool_use.name.clone();
-            let mut tool_telemetry = ToolUseEventBuilder::new(conv_id.clone(), tool_use.id.clone())
-                .set_tool_use_id(tool_use_id.clone())
-                .set_tool_name(tool_use.name.clone())
-                .utterance_id(self.conversation_state.message_id().map(|s| s.to_string()));
+            let mut tool_telemetry = ToolUseEventBuilder::new(
+                conv_id.clone(),
+                tool_use.id.clone(),
+                self.conversation_state.model.clone(),
+            )
+            .set_tool_use_id(tool_use_id.clone())
+            .set_tool_name(tool_use.name.clone())
+            .utterance_id(self.conversation_state.message_id().map(|s| s.to_string()));
             match self.conversation_state.tool_manager.get_tool_from_tool_use(tool_use) {
                 Ok(mut tool) => {
                     // Apply non-Q-generated context to tools
@@ -3863,6 +3911,7 @@ impl ChatContext {
         request_id: Option<String>,
         result: TelemetryResult,
         reason: Option<String>,
+        reason_desc: Option<String>,
     ) {
         telemetry
             .send_chat_added_message(
@@ -3873,12 +3922,20 @@ impl ChatContext {
                 self.conversation_state.context_message_length(),
                 result,
                 reason,
+                reason_desc,
+                self.conversation_state.model.clone(),
             )
             .await
             .ok();
     }
 
-    async fn send_error_telemetry(&self, database: &Database, telemetry: &TelemetryThread, reason: String) {
+    async fn send_error_telemetry(
+        &self,
+        database: &Database,
+        telemetry: &TelemetryThread,
+        reason: String,
+        reason_desc: Option<String>,
+    ) {
         telemetry
             .send_response_error(
                 database,
@@ -3886,6 +3943,7 @@ impl ChatContext {
                 self.conversation_state.context_message_length(),
                 TelemetryResult::Failed,
                 Some(reason),
+                reason_desc,
             )
             .await
             .ok();
@@ -3986,22 +4044,6 @@ fn create_stream(model_responses: serde_json::Value) -> StreamingClient {
         mock.push(stream);
     }
     StreamingClient::mock(mock)
-}
-
-/// Returns surface error + root cause as a string. If there is only one error
-/// in the chain, return that as a string.
-fn get_error_string(error: &(dyn Error + 'static)) -> String {
-    let err_chain = Chain::new(error);
-
-    if err_chain.len() > 1 {
-        format!(
-            "'{}' caused by: {}",
-            error,
-            err_chain.last().map_or("UNKNOWN".to_string(), |e| e.to_string())
-        )
-    } else {
-        error.to_string()
-    }
 }
 
 #[cfg(test)]
