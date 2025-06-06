@@ -23,6 +23,10 @@ use super::{
     ToolPermission,
 };
 use crate::cli::chat::token_counter::TokenCounter;
+use crate::cli::persona::{
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::platform::Context;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,5 +222,11 @@ impl GhIssue {
 
     pub async fn validate(&mut self, _ctx: &Context) -> Result<()> {
         Ok(())
+    }
+}
+
+impl PermissionCandidate for GhIssue {
+    fn eval(&self, _tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
+        PermissionEvalResult::Allow
     }
 }

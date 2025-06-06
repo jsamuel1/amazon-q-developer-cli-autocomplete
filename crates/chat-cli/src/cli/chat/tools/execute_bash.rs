@@ -30,6 +30,10 @@ use crate::cli::chat::{
     CONTINUATION_LINE,
     PURPOSE_ARROW,
 };
+use crate::cli::persona::{
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::platform::Context;
 const READONLY_COMMANDS: &[&str] = &["ls", "cat", "echo", "pwd", "which", "head", "tail", "find", "grep"];
 
@@ -149,6 +153,35 @@ impl ExecuteBash {
     pub async fn validate(&mut self, _ctx: &Context) -> Result<()> {
         // TODO: probably some small amount of PATH checking
         Ok(())
+    }
+}
+
+impl PermissionCandidate for ExecuteBash {
+    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
+        use crate::cli::persona::ToolPermission;
+
+        let Self { command, .. } = self;
+        let Some(perm) = tool_permissions.built_in.get("execute_bash") else {
+            if self.requires_acceptance() {
+                return PermissionEvalResult::Ask;
+            } else {
+                return PermissionEvalResult::Allow;
+            }
+        };
+
+        match perm {
+            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
+            ToolPermission::Deny => PermissionEvalResult::Deny,
+            ToolPermission::DetailedList { always_allow, deny } => {
+                if deny.iter().any(|c| command.contains(c)) {
+                    return PermissionEvalResult::Deny;
+                }
+                if always_allow.iter().any(|c| command.contains(c)) {
+                    return PermissionEvalResult::Allow;
+                }
+                PermissionEvalResult::Ask
+            },
+        }
     }
 }
 

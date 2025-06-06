@@ -11,6 +11,10 @@ use eyre::{
     Result,
     bail,
 };
+use globset::{
+    Glob,
+    GlobSetBuilder,
+};
 use serde::{
     Deserialize,
     Serialize,
@@ -86,17 +90,76 @@ impl PermissionCandidate for FsRead {
             return PermissionEvalResult::Allow;
         };
 
-        todo!()
-        // match perm {
-        //     ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
-        //     ToolPermission::Deny => PermissionEvalResult::Deny,
-        //     ToolPermission::DetailedList { always_allow, deny } => match self {
-        //         Self::Line(fs_line) => {},
-        //         Self::Directory(fs_dir) => {},
-        //         Self::Search(fs_search) => {},
-        //         Self::Image(fs_image) => {},
-        //     },
-        // }
+        match perm {
+            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
+            ToolPermission::Deny => PermissionEvalResult::Deny,
+            ToolPermission::DetailedList { always_allow, deny } => {
+                let allow_set = {
+                    let mut builder = GlobSetBuilder::new();
+                    for path in always_allow {
+                        if let Ok(glob) = Glob::new(path) {
+                            builder.add(glob);
+                        } else {
+                            warn!("Failed to create glob from path given: {path}. Ignoring.");
+                        }
+                    }
+                    builder.build()
+                };
+
+                let deny_set = {
+                    let mut builder = GlobSetBuilder::new();
+                    for path in deny {
+                        if let Ok(glob) = Glob::new(path) {
+                            builder.add(glob);
+                        } else {
+                            warn!("Failed to create glob from path given: {path}. Ignoring.");
+                        }
+                    }
+                    builder.build()
+                };
+
+                match (allow_set, deny_set) {
+                    (Ok(allow_set), Ok(deny_set)) => {
+                        match self {
+                            Self::Line(FsLine { path, .. })
+                            | Self::Directory(FsDirectory { path, .. })
+                            | Self::Search(FsSearch { path, .. }) => {
+                                if deny_set.is_match(path) {
+                                    return PermissionEvalResult::Deny;
+                                }
+                                if allow_set.is_match(path) {
+                                    return PermissionEvalResult::Allow;
+                                }
+                            },
+                            Self::Image(fs_image) => {
+                                let paths = &fs_image.image_paths;
+                                if paths.iter().any(|path| deny_set.is_match(path)) {
+                                    return PermissionEvalResult::Deny;
+                                }
+                                if paths.iter().all(|path| allow_set.is_match(path)) {
+                                    return PermissionEvalResult::Allow;
+                                }
+                            },
+                        }
+                        // By default, fs_read are allowed / trusted since all of operations are
+                        // read only. But if the users go through the trouble of specifying an
+                        // allow or deny list, we are going to assume they no longer want to trust
+                        // every read only.
+                        PermissionEvalResult::Ask
+                    },
+                    (allow_res, deny_res) => {
+                        if let Err(e) = allow_res {
+                            warn!("fs_read failed to build allow set: {:?}", e);
+                        }
+                        if let Err(e) = deny_res {
+                            warn!("fs_read failed to build deny set: {:?}", e);
+                        }
+                        warn!("One or more detailed args failed to parse, falling back to ask");
+                        PermissionEvalResult::Ask
+                    },
+                }
+            },
+        }
     }
 }
 

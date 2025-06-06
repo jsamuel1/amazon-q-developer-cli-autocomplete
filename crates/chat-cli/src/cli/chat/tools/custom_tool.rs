@@ -18,6 +18,10 @@ use tracing::warn;
 use super::InvokeOutput;
 use crate::cli::chat::CONTINUATION_LINE;
 use crate::cli::chat::token_counter::TokenCounter;
+use crate::cli::persona::{
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::mcp_client::{
     Client as McpClient,
     ClientConfig as McpClientConfig,
@@ -238,5 +242,36 @@ impl CustomTool {
     pub fn get_input_token_size(&self) -> usize {
         TokenCounter::count_tokens(self.method.as_str())
             + TokenCounter::count_tokens(self.params.as_ref().map_or("", |p| p.as_str().unwrap_or_default()))
+    }
+}
+
+impl PermissionCandidate for CustomTool {
+    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
+        use crate::cli::persona::ToolPermission;
+
+        let Self {
+            name: tool_name,
+            client,
+            ..
+        } = self;
+        let server_name = client.get_server_name();
+        let Some(perm) = tool_permissions.built_in.get(server_name) else {
+            // This really should not happen
+            return PermissionEvalResult::Allow;
+        };
+
+        match perm {
+            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
+            ToolPermission::Deny => PermissionEvalResult::Deny,
+            ToolPermission::DetailedList { always_allow, deny } => {
+                if deny.contains(tool_name) {
+                    return PermissionEvalResult::Deny;
+                }
+                if always_allow.contains(tool_name) {
+                    return PermissionEvalResult::Allow;
+                }
+                PermissionEvalResult::Ask
+            },
+        }
     }
 }

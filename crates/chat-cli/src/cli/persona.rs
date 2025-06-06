@@ -114,10 +114,14 @@ pub(crate) enum ToolPermission {
     AlwaysAllow,
     /// Cannot be executed
     Deny,
-    /// A more nuanced way of specifying what gets permitted
-    /// The content of the vector are arguments / command with which the tool is run
+    /// A more nuanced way of specifying what gets permitted.
+    /// The content of the vector are arguments / command with which the tool is run.
     /// Because the way they are interpreted is dependent on the tool, this is most expected to be
-    /// used on native tools such as fs_read / fs_write (at least until further notice)
+    /// used on native tools such as fs_read / fs_write (at least until further notice).
+    /// For now, vectors contain String, or the arguments in their most primitive forms.
+    /// This is because this field is overloaded, and it is best to leave any further
+    /// deserialization to the individual tools that are receiving this config. This simplifies the
+    /// deserialization process on a schema level at the cost of performance during a tool call.
     DetailedList {
         #[serde(default)]
         always_allow: Vec<String>,

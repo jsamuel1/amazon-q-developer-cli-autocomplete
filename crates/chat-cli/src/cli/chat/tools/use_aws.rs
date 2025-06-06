@@ -22,6 +22,10 @@ use super::{
     MAX_TOOL_RESPONSE_SIZE,
     OutputKind,
 };
+use crate::cli::persona::{
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::platform::Context;
 
 const READONLY_OPS: [&str; 6] = ["get", "describe", "list", "ls", "search", "batch_get"];
@@ -186,6 +190,37 @@ impl UseAws {
             Some(params)
         } else {
             None
+        }
+    }
+}
+
+impl PermissionCandidate for UseAws {
+    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
+        use crate::cli::persona::ToolPermission;
+
+        let Some(perm) = tool_permissions.built_in.get("use_aws") else {
+            if self.requires_acceptance() {
+                return PermissionEvalResult::Ask;
+            } else {
+                return PermissionEvalResult::Allow;
+            }
+        };
+
+        match perm {
+            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
+            ToolPermission::Deny => PermissionEvalResult::Deny,
+            ToolPermission::DetailedList { always_allow, deny } => {
+                // TODO: we need spec out the config some more here
+                // We'll just go with the service names for now
+                let Self { service_name, .. } = self;
+                if deny.contains(service_name) {
+                    return PermissionEvalResult::Deny;
+                }
+                if always_allow.contains(service_name) {
+                    return PermissionEvalResult::Allow;
+                }
+                PermissionEvalResult::Ask
+            },
         }
     }
 }
