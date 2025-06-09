@@ -52,6 +52,45 @@ impl Write for SharedWriter {
     }
 }
 
+/// A writer that writes to multiple destinations.
+pub struct TeeWriter {
+    writers: Vec<Box<dyn Write + Send + 'static>>,
+}
+
+impl TeeWriter {
+    pub fn new<W1, W2>(writer1: W1, writer2: W2) -> Self
+    where
+        W1: Write + Send + 'static,
+        W2: Write + Send + 'static,
+    {
+        Self {
+            writers: vec![Box::new(writer1), Box::new(writer2)],
+        }
+    }
+}
+
+impl std::fmt::Debug for TeeWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeeWriter").finish()
+    }
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        for writer in &mut self.writers {
+            writer.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        for writer in &mut self.writers {
+            writer.flush()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NullWriter {}
 

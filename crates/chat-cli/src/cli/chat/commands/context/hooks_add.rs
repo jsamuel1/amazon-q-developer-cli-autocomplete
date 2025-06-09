@@ -104,7 +104,7 @@ impl CommandHandler for AddHooksCommand {
                 if last_arg.starts_with("--trigger=") {
                     return hooks_completion::get_trigger_suggestions(args);
                 }
-                
+
                 // Handle command completion using path completer
                 if last_arg == &"--command" {
                     if let Some(ctx) = ctx {

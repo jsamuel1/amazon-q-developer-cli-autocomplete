@@ -6,7 +6,7 @@ use crossterm::style::{
     Color,
 };
 
-use crate::cli::chat::commands::CommandHandler;
+use crate::cli::chat::commands::handler::CommandHandler;
 use crate::cli::chat::{
     ChatError,
     ChatState,
@@ -126,6 +126,56 @@ impl CommandHandler for RemoveContextCommand {
 
     fn requires_confirmation(&self, _args: &[&str]) -> bool {
         true // Removing context files requires confirmation as it's a destructive operation
+    }
+
+    fn complete_arguments(
+        &self,
+        args: &[&str],
+        ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        if let Some(ctx) = ctx {
+            // Check if we're after a --global flag
+            let is_global = args.contains(&"--global");
+            let key = if is_global { "global" } else { "current" };
+
+            // If we have a completion cache, use it for better suggestions
+            if ctx.completion_cache.has_category("context_files") {
+                if let Some(partial_input) = args.last().filter(|&arg| arg != &"--global") {
+                    // Use fuzzy matching for better suggestions
+                    return ctx
+                        .completion_cache
+                        .get_best_matches("context_files", key, partial_input, 10);
+                } else {
+                    // Return all context files
+                    return ctx.completion_cache.get("context_files", key);
+                }
+            }
+
+            // Fallback to direct context manager access if cache is not available
+            if let Some(context_manager) = &ctx.conversation_state.context_manager {
+                // Get paths from the appropriate config
+                let paths = if is_global {
+                    &context_manager.global_config.paths
+                } else {
+                    &context_manager.profile_config.paths
+                };
+
+                // If we've started typing a path
+                if let Some(last_arg) = args.last() {
+                    if last_arg != &"--global" {
+                        return paths
+                            .iter()
+                            .filter(|path| path.starts_with(last_arg))
+                            .cloned()
+                            .collect();
+                    }
+                }
+
+                // Otherwise suggest all paths
+                return paths.clone();
+            }
+        }
+        Vec::new()
     }
 }
 

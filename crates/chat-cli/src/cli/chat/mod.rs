@@ -809,7 +809,7 @@ impl ChatContext {
                         static COMPLETION_CACHE: std::sync::OnceLock<commands::completion_adapter::CompletionCache> =
                             std::sync::OnceLock::new();
                         let cache =
-                            COMPLETION_CACHE.get_or_init(|| commands::completion_adapter::CompletionCache::new());
+                            COMPLETION_CACHE.get_or_init(commands::completion_adapter::CompletionCache::new);
 
                         let adapter = commands::CompletionContextAdapter {
                             conversation_state: &self.conversation_state,

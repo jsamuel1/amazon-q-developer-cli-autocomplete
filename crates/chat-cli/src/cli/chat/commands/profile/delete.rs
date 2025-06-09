@@ -116,4 +116,31 @@ impl CommandHandler for DeleteProfileCommand {
     fn requires_confirmation(&self, _args: &[&str]) -> bool {
         true // Delete command requires confirmation
     }
+
+    fn complete_arguments(
+        &self,
+        args: &[&str],
+        ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        // If we have context and no arguments yet, suggest profile names
+        if args.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(context_manager) = &ctx.conversation_state.context_manager {
+                    // Use the blocking version since we're in a synchronous context
+                    if let Ok(profiles) = context_manager.list_profiles_blocking() {
+                        // Filter out the default profile (can't be deleted) and the current profile
+                        return profiles
+                            .into_iter()
+                            .filter(|p| {
+                                p != "default" && Some(p.as_str()) != Some(context_manager.current_profile.as_str())
+                            })
+                            .collect();
+                    }
+                }
+            }
+        }
+
+        // Default: no suggestions
+        Vec::new()
+    }
 }

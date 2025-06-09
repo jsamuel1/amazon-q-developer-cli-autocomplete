@@ -29,8 +29,9 @@ impl InputSource {
     pub fn new(
         sender: std::sync::mpsc::Sender<Option<String>>,
         receiver: std::sync::mpsc::Receiver<Vec<String>>,
+        context_manager: Option<super::context::ContextManager>,
     ) -> Result<Self> {
-        Ok(Self(inner::Inner::Readline(rl(sender, receiver)?)))
+        Ok(Self(inner::Inner::Readline(rl(sender, receiver, context_manager)?)))
     }
 
     #[cfg(unix)]

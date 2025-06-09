@@ -88,8 +88,27 @@ pub struct ConversationState {
     /// Cached value representing the length of the user context message.
     context_message_length: Option<usize>,
     /// Stores the latest conversation summary created by /compact
+    conversation_summary: Option<String>,
     latest_summary: Option<String>,
     updates: Option<SharedWriter>,
+}
+
+impl Default for ConversationState {
+    fn default() -> Self {
+        Self {
+            conversation_id: uuid::Uuid::new_v4().to_string(),
+            next_message: None,
+            history: VecDeque::new(),
+            valid_history_range: (0, 0),
+            transcript: VecDeque::new(),
+            tools: HashMap::new(),
+            context_manager: None,
+            context_message_length: None,
+            conversation_summary: None,
+            latest_summary: None,
+            updates: None,
+        }
+    }
 }
 
 impl ConversationState {
@@ -138,6 +157,7 @@ impl ConversationState {
                 }),
             context_manager,
             context_message_length: None,
+            conversation_summary: None,
             latest_summary: None,
             updates,
         }
@@ -813,6 +833,27 @@ fn format_hook_context<'a>(hook_results: impl IntoIterator<Item = &'a (Hook, Str
     }
     context_content.push_str(CONTEXT_ENTRY_END_HEADER);
     context_content
+}
+
+impl ConversationState {
+    /// Create a minimal ConversationState for use in synchronous contexts like completion
+    /// This is a blocking version that creates a minimal ConversationState suitable for completion
+    pub fn new_minimal_blocking() -> Self {
+        // Create a minimal conversation state with just the required fields
+        Self {
+            conversation_id: "minimal".to_string(),
+            next_message: None,
+            history: VecDeque::new(),
+            valid_history_range: (0, 0),
+            transcript: VecDeque::new(),
+            tools: HashMap::new(),
+            context_manager: None,
+            context_message_length: None,
+            conversation_summary: None,
+            latest_summary: None,
+            updates: None,
+        }
+    }
 }
 
 #[cfg(test)]

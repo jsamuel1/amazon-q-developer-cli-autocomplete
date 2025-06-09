@@ -106,4 +106,34 @@ impl CommandHandler for ResetSingleToolCommand {
     fn requires_confirmation(&self, _args: &[&str]) -> bool {
         true // Reset single command requires confirmation as it's a mutative operation
     }
+
+    fn complete_arguments(
+        &self,
+        _args: &[&str],
+        ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        // If we have context, suggest all tools
+        if let Some(ctx) = ctx {
+            // Get all tool names from the conversation state
+            let mut tool_names = Vec::new();
+
+            for tools in ctx.conversation_state.tools.values() {
+                for tool in tools {
+                    // Use a match statement instead of if let to avoid the irrefutable pattern warning
+                    match tool {
+                        crate::api_client::model::Tool::ToolSpecification(spec) => {
+                            tool_names.push(spec.name.clone());
+                        },
+                    }
+                }
+            }
+
+            // Sort for consistent presentation
+            tool_names.sort();
+            return tool_names;
+        }
+
+        // Default: no suggestions
+        Vec::new()
+    }
 }

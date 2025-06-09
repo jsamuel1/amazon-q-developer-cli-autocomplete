@@ -499,6 +499,117 @@ pub struct ToolManager {
 }
 
 impl ToolManager {
+    /// Get all tools from the tool manager, categorized by their origin
+    pub fn get_tools_by_origin(&self) -> HashMap<ToolOrigin, Vec<crate::api_client::model::Tool>> {
+        let mut tools_by_origin = HashMap::new();
+
+        // Group built-in tools under Native origin
+        let built_in_tools: Vec<_> = self
+            .schema
+            .values()
+            .filter(|spec| matches!(spec.tool_origin, ToolOrigin::Native))
+            .map(|spec| {
+                crate::api_client::model::Tool::ToolSpecification(crate::api_client::model::ToolSpecification {
+                    name: spec.name.clone(),
+                    description: spec.description.clone(),
+                    input_schema: spec.input_schema.clone().into(),
+                })
+            })
+            .collect();
+
+        if !built_in_tools.is_empty() {
+            tools_by_origin.insert(ToolOrigin::Native, built_in_tools);
+        }
+
+        // Group MCP server tools by their respective server origins
+        let mcp_tools: HashMap<String, Vec<_>> = self
+            .schema
+            .values()
+            .filter_map(|spec| {
+                if let ToolOrigin::McpServer(server_name) = &spec.tool_origin {
+                    Some((
+                        server_name.clone(),
+                        crate::api_client::model::Tool::ToolSpecification(
+                            crate::api_client::model::ToolSpecification {
+                                name: spec.name.clone(),
+                                description: spec.description.clone(),
+                                input_schema: spec.input_schema.clone().into(),
+                            },
+                        ),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .fold(HashMap::new(), |mut acc, (server, tool)| {
+                acc.entry(server).or_default().push(tool);
+                acc
+            });
+
+        // Add MCP server tools to the result
+        for (server, tools) in mcp_tools {
+            tools_by_origin.insert(ToolOrigin::McpServer(server), tools);
+        }
+
+        tools_by_origin
+    }
+
+    /// Get all tools from the tool manager
+    pub fn get_tools(&self) -> Vec<crate::api_client::model::Tool> {
+        self.schema
+            .values()
+            .map(|spec| {
+                crate::api_client::model::Tool::ToolSpecification(crate::api_client::model::ToolSpecification {
+                    name: spec.name.clone(),
+                    description: spec.description.clone(),
+                    input_schema: spec.input_schema.clone().into(),
+                })
+            })
+            .collect()
+    }
+
+    /// Get all available tool names from the conversation state
+    ///
+    /// This function extracts the common logic used in trust.rs and untrust.rs for iterating
+    /// through tools and getting their names. It can filter tools based on their trust status.
+    ///
+    /// # Arguments
+    ///
+    /// * `conversation_state` - The conversation state containing the tools
+    /// * `tool_permissions` - The tool permissions manager
+    /// * `only_trusted` - If true, only return trusted tools; if false, only return untrusted tools
+    ///
+    /// # Returns
+    ///
+    /// A vector of tool names that match the filter criteria
+    pub fn get_filtered_tool_names(
+        conversation_state: &crate::cli::chat::ConversationState,
+        tool_permissions: &crate::cli::chat::ToolPermissions,
+        only_trusted: bool,
+    ) -> Vec<String> {
+        let mut available_tools = Vec::new();
+
+        // Collect all tool names from the conversation state
+        for tools in conversation_state.tools.values() {
+            for tool in tools {
+                // Use a match statement instead of if let to avoid the irrefutable pattern warning
+                match tool {
+                    crate::api_client::model::Tool::ToolSpecification(spec) => {
+                        // Filter based on trust status
+                        let is_trusted = tool_permissions.is_trusted(&spec.name);
+                        if (only_trusted && is_trusted) || (!only_trusted && !is_trusted) {
+                            available_tools.push(spec.name.clone());
+                        }
+                    },
+                }
+            }
+        }
+
+        // Sort for consistent presentation
+        available_tools.sort();
+        available_tools
+    }
+
     pub async fn load_tools(&mut self) -> eyre::Result<HashMap<String, ToolSpec>> {
         let tx = self.loading_status_sender.take();
         let display_task = self.loading_display_task.take();
@@ -513,7 +624,7 @@ impl ToolManager {
             );
 
             if !crate::cli::chat::tools::thinking::Thinking::is_enabled() {
-                tool_specs.remove("q_think_tool");
+                tool_specs.remove("thinking");
             }
             Arc::new(Mutex::new(tool_specs))
         };
@@ -688,7 +799,7 @@ impl ToolManager {
             "internal_command" => {
                 Tool::InternalCommand(serde_json::from_value::<InternalCommand>(value.args).map_err(map_err)?)
             },
-            "q_think_tool" => Tool::Thinking(serde_json::from_value::<Thinking>(value.args).map_err(map_err)?),
+            "thinking" => Tool::Thinking(serde_json::from_value::<Thinking>(value.args).map_err(map_err)?),
             // Note that this name is namespaced with server_name{DELIMITER}tool_name
             name => {
                 // Note: tn_map also has tools that underwent no transformation. In otherwords, if
@@ -1036,6 +1147,10 @@ fn queue_warn_message(name: &str, msg: &eyre::Report, output: &mut impl Write) -
         style::Print(msg),
         style::ResetColor,
     )?)
+}
+
+impl ToolManager {
+    // Implementation of ToolManager methods
 }
 
 #[cfg(test)]

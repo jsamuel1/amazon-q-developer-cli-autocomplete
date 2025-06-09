@@ -51,7 +51,7 @@ pub struct CompletionContextAdapter<'a> {
 
     /// Completion cache for context-aware suggestions
     pub completion_cache: &'a CompletionCache,
-    
+
     /// Path completer for file path completion
     pub path_completer: Option<&'a dyn PathCompleter>,
 }

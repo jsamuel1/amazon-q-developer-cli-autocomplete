@@ -275,6 +275,21 @@ impl ContextManager {
         Ok(profiles)
     }
 
+    /// Get a list of context file paths synchronously.
+    ///
+    /// This method creates a new tokio runtime and blocks on the async `get_context_files` method.
+    ///
+    /// # Returns
+    /// A Result containing a vector of file paths or an error
+    pub fn list_context_files_blocking(&self) -> Result<Vec<String>> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let context_files = runtime.block_on(async {
+            let result = self.get_context_files().await?;
+            Ok::<_, eyre::Error>(result.into_iter().map(|(path, _)| path).collect())
+        })?;
+        Ok(context_files)
+    }
+
     /// Clear all paths from the context configuration.
     ///
     /// # Arguments

@@ -137,19 +137,19 @@ impl PathCompleter {
             Self::ContextAware(_, ctx) => Some(ctx),
         }
     }
-    
+
     /// Complete a file path with the given prefix
     pub fn complete(&self, path_prefix: &str) -> Vec<String> {
         // Create a dummy context for the filename completer
         let empty_history = DefaultHistory::new();
         let ctx = Context::new(&empty_history);
-        
+
         // Use the filename completer to get path completions
         let filename_completer = match self {
             Self::Standard(completer) => completer,
             Self::ContextAware(completer, _) => completer,
         };
-        
+
         // Try to complete the path
         match filename_completer.complete(path_prefix, path_prefix.len(), &ctx) {
             Ok((_, completions)) => {

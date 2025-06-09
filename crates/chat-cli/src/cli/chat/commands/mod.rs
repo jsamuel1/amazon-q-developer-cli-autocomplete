@@ -1,5 +1,6 @@
 pub mod clear;
 pub mod compact;
+pub mod completion_adapter;
 pub mod context;
 pub mod context_adapter;
 pub mod editor;
@@ -14,6 +15,7 @@ pub mod test_utils;
 pub mod tools;
 pub mod usage;
 
+pub use completion_adapter::CompletionContextAdapter;
 pub use context_adapter::CommandContextAdapter;
 // Keep CommandHandler as crate-only visibility
 pub(crate) use handler::CommandHandler;

@@ -133,4 +133,26 @@ impl CommandHandler for RenameProfileCommand {
     fn requires_confirmation(&self, _args: &[&str]) -> bool {
         true // Rename command requires confirmation as it's a mutative operation
     }
+
+    fn complete_arguments(
+        &self,
+        args: &[&str],
+        ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        // If we have context and only one argument so far, suggest profile names for the old_name
+        if args.len() <= 1 {
+            if let Some(ctx) = ctx {
+                if let Some(context_manager) = &ctx.conversation_state.context_manager {
+                    // Use the blocking version since we're in a synchronous context
+                    if let Ok(profiles) = context_manager.list_profiles_blocking() {
+                        // Filter out the default profile (can't be renamed)
+                        return profiles.into_iter().filter(|p| p != "default").collect();
+                    }
+                }
+            }
+        }
+
+        // Default: no suggestions
+        Vec::new()
+    }
 }

@@ -132,6 +132,107 @@ impl CommandHandler for AddContextCommand {
     fn requires_confirmation(&self, _args: &[&str]) -> bool {
         true // Adding context files requires confirmation as it's a mutative operation
     }
+
+    fn complete_arguments(
+        &self,
+        args: &[&str],
+        ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        use std::fs;
+        use std::path::Path;
+
+        // Filter out flags to get the last path argument if any
+        let path_args: Vec<&str> = args
+            .iter()
+            .filter(|&&arg| arg != "--global" && arg != "--force")
+            .copied()
+            .collect();
+
+        let mut completions = Vec::new();
+
+        // If we have a path argument, use it for completion
+        if let Some(last_path) = path_args.last() {
+            let path = Path::new(last_path);
+
+            // If the path is a directory that exists, list its contents
+            if path.is_dir() {
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.filter_map(Result::ok) {
+                        let entry_path = entry.path();
+                        let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
+
+                        // Add trailing slash for directories
+                        let suggestion = if entry_path.is_dir() {
+                            format!("{}/{}", last_path.trim_end_matches('/'), file_name)
+                        } else {
+                            format!("{}/{}", last_path.trim_end_matches('/'), file_name)
+                        };
+
+                        completions.push(suggestion);
+                    }
+                }
+            } else {
+                // Try to complete based on the parent directory
+                if let Some(parent) = path.parent() {
+                    let file_prefix = path.file_name().unwrap_or_default().to_string_lossy();
+
+                    if let Ok(entries) = fs::read_dir(parent) {
+                        for entry in entries.filter_map(Result::ok) {
+                            let entry_path = entry.path();
+                            let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
+
+                            if file_name.to_string().starts_with(&*file_prefix) {
+                                let parent_str = parent.to_string_lossy();
+                                let suggestion = if entry_path.is_dir() {
+                                    format!("{}/{}/", parent_str, file_name)
+                                } else {
+                                    format!("{}/{}", parent_str, file_name)
+                                };
+
+                                completions.push(suggestion);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // No path argument yet, suggest common directories
+            completions.extend(vec![
+                "./".to_string(),
+                "../".to_string(),
+                "/".to_string(),
+                "~/".to_string(),
+            ]);
+        }
+
+        // If we have context manager, also suggest existing context files
+        if let Some(ctx) = ctx {
+            if let Some(_context_manager) = &ctx.conversation_state.context_manager {
+                // We can't directly use get_context_files() here because it's async
+                // and complete_arguments is synchronous. In a real implementation,
+                // we would need to refactor the API to support async completions.
+                // For now, we'll just add some common context files as suggestions.
+                let common_context_files = vec![
+                    "README.md".to_string(),
+                    "CONTRIBUTING.md".to_string(),
+                    "LICENSE.md".to_string(),
+                ];
+
+                for file_path in common_context_files {
+                    // Only add if it's not already in the list and matches the prefix
+                    if let Some(last_path) = path_args.last() {
+                        if file_path.starts_with(last_path) && !completions.contains(&file_path) {
+                            completions.push(file_path);
+                        }
+                    } else if !completions.contains(&file_path) {
+                        completions.push(file_path);
+                    }
+                }
+            }
+        }
+
+        completions
+    }
 }
 
 #[cfg(test)]

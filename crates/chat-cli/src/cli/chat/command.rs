@@ -1085,7 +1085,7 @@ impl Command {
                         ("disable-all", &DISABLE_ALL_HOOKS_HANDLER as &dyn CommandHandler),
                         ("help", &HOOKS_HELP_HANDLER as &dyn CommandHandler),
                     ];
-                }
+                },
                 // Add other nested subcommands here if needed
                 _ => return Vec::new(),
             }

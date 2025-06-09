@@ -116,4 +116,35 @@ impl CommandHandler for SetProfileCommand {
     fn requires_confirmation(&self, _args: &[&str]) -> bool {
         true // Set command requires confirmation as it's a mutative operation
     }
+
+    fn complete_arguments(
+        &self,
+        args: &[&str],
+        ctx: Option<&crate::cli::chat::commands::CompletionContextAdapter<'_>>,
+    ) -> Vec<String> {
+        if let Some(ctx) = ctx {
+            // If we have a completion cache, use it for better suggestions
+            if ctx.completion_cache.has_category("profiles") {
+                if let Some(partial_input) = args.last() {
+                    // Use fuzzy matching for better suggestions
+                    return ctx
+                        .completion_cache
+                        .get_best_matches("profiles", "all", partial_input, 10);
+                } else {
+                    // Return all profiles
+                    return ctx.completion_cache.get("profiles", "all");
+                }
+            }
+
+            // Fallback to direct context manager access if cache is not available
+            if let Some(context_manager) = &ctx.conversation_state.context_manager {
+                if let Ok(profiles) = context_manager.list_profiles_blocking() {
+                    return profiles;
+                }
+            }
+        }
+
+        // Default: no suggestions
+        Vec::new()
+    }
 }

@@ -29,6 +29,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use super::completion_adapter::CompletionContextAdapter;
 use super::context_adapter::CommandContextAdapter;
 use crate::cli::chat::command::Command;
 use crate::cli::chat::{
@@ -124,5 +125,17 @@ pub(crate) trait CommandHandler: Send + Sync {
     #[allow(dead_code)]
     fn parse_args<'a>(&self, args: Vec<&'a str>) -> Result<Vec<&'a str>, ChatError> {
         Ok(args)
+    }
+
+    /// Provide completion suggestions for arguments to this command
+    ///
+    /// This method is used by the tab completion system to provide context-aware
+    /// completions for command arguments. It takes the current arguments and the
+    /// completion context adapter, and returns a list of possible completions.
+    ///
+    /// The default implementation returns no suggestions.
+    fn complete_arguments(&self, _args: &[&str], _ctx: Option<&CompletionContextAdapter<'_>>) -> Vec<String> {
+        // Default implementation returns no suggestions
+        Vec::new()
     }
 }

@@ -13,6 +13,7 @@ use crate::cli::chat::command::Command;
 use crate::cli::chat::commands::context_adapter::CommandContextAdapter;
 use crate::cli::chat::commands::handler::CommandHandler;
 use crate::cli::chat::consts::DUMMY_TOOL_NAME;
+use crate::cli::chat::tools::ToolOrigin;
 use crate::cli::chat::{
     ChatError,
     ChatState,
@@ -80,33 +81,57 @@ impl CommandHandler for ListToolsCommand {
                 style::Print("▔".repeat(terminal_width)),
             )?;
 
-            ctx.conversation_state.tools.iter().for_each(|(origin, tools)| {
-                let to_display = tools
-                    .iter()
-                    .filter(|FigTool::ToolSpecification(spec)| spec.name != DUMMY_TOOL_NAME)
-                    .fold(String::new(), |mut acc, FigTool::ToolSpecification(spec)| {
-                        let width = longest - spec.name.len() + 4;
-                        acc.push_str(
-                            format!(
-                                "- {}{:>width$}{}\n",
-                                spec.name,
-                                "",
-                                ctx.tool_permissions.display_label(&spec.name),
-                                width = width
-                            )
-                            .as_str(),
-                        );
-                        acc
-                    });
-                let _ = queue!(
-                    ctx.output,
-                    style::SetAttribute(Attribute::Bold),
-                    style::Print(format!("{}:\n", origin)),
-                    style::SetAttribute(Attribute::Reset),
-                    style::Print(to_display),
-                    style::Print("\n")
-                );
+            // Sort origins: Built-in first, then alphabetically by name
+            let mut origins: Vec<_> = ctx.conversation_state.tools.keys().collect();
+            origins.sort_by(|a, b| match (a, b) {
+                (ToolOrigin::Native, _) => std::cmp::Ordering::Less,
+                (_, ToolOrigin::Native) => std::cmp::Ordering::Greater,
+                (ToolOrigin::McpServer(a_name), ToolOrigin::McpServer(b_name)) => {
+                    a_name.to_lowercase().cmp(&b_name.to_lowercase())
+                },
             });
+
+            for origin in origins {
+                if let Some(tools) = ctx.conversation_state.tools.get(origin) {
+                    // Sort tools alphabetically by name (case insensitive)
+                    let mut sorted_tools: Vec<_> = tools.iter().collect();
+                    sorted_tools.sort_by(|a, b| {
+                        let a_name = match a {
+                            FigTool::ToolSpecification(spec) => &spec.name,
+                        };
+                        let b_name = match b {
+                            FigTool::ToolSpecification(spec) => &spec.name,
+                        };
+                        a_name.to_lowercase().cmp(&b_name.to_lowercase())
+                    });
+
+                    let to_display = sorted_tools
+                        .iter()
+                        .filter(|FigTool::ToolSpecification(spec)| spec.name != DUMMY_TOOL_NAME)
+                        .fold(String::new(), |mut acc, FigTool::ToolSpecification(spec)| {
+                            let width = longest - spec.name.len() + 4;
+                            acc.push_str(
+                                format!(
+                                    "- {}{:>width$}{}\n",
+                                    spec.name,
+                                    "",
+                                    ctx.tool_permissions.display_label(&spec.name),
+                                    width = width
+                                )
+                                .as_str(),
+                            );
+                            acc
+                        });
+                    let _ = queue!(
+                        ctx.output,
+                        style::SetAttribute(Attribute::Bold),
+                        style::Print(format!("{}:\n", origin)),
+                        style::SetAttribute(Attribute::Reset),
+                        style::Print(to_display),
+                        style::Print("\n")
+                    );
+                }
+            }
 
             queue!(
                 ctx.output,
@@ -175,6 +200,7 @@ mod tests {
             interactive: true,
             input_source: &mut input_source,
             settings: &settings,
+            terminal_width: 80, // Add default terminal width for tests
         };
 
         // Execute the list subcommand
