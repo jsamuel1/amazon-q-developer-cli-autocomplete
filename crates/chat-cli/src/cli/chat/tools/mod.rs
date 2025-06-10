@@ -64,7 +64,7 @@ impl Tool {
         match self {
             Tool::FsRead(_) => false,
             Tool::FsWrite(_) => true,
-            Tool::ExecuteBash(execute_bash) => execute_bash.requires_acceptance(),
+            Tool::ExecuteBash(execute_bash) => execute_bash.requires_acceptance(None, true),
             Tool::UseAws(use_aws) => use_aws.requires_acceptance(),
             Tool::Custom(_) => true,
             Tool::GhIssue(_) => false,

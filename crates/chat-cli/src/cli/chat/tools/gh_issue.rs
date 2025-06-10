@@ -22,11 +22,12 @@ use super::{
     InvokeOutput,
     ToolPermission,
 };
-use crate::cli::chat::token_counter::TokenCounter;
-use crate::cli::persona::{
+use crate::cli::agent::{
+    Agent,
     PermissionCandidate,
     PermissionEvalResult,
 };
+use crate::cli::chat::token_counter::TokenCounter;
 use crate::platform::Context;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -226,7 +227,7 @@ impl GhIssue {
 }
 
 impl PermissionCandidate for GhIssue {
-    fn eval(&self, _tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
+    fn eval(&self, _agent: &Agent) -> PermissionEvalResult {
         PermissionEvalResult::Allow
     }
 }

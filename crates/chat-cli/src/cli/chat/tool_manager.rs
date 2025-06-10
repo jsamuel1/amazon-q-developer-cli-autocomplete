@@ -289,10 +289,11 @@ impl ToolManagerBuilder {
         let is_interactive = self.is_interactive;
         let pre_initialized = mcp_servers
             .into_iter()
-            .map(|(server_name, server_config)| {
-                let snaked_cased_name = server_name.to_case(convert_case::Case::Snake);
+            .map(|(orig_name, server_config)| {
+                let snaked_cased_name = orig_name.to_case(convert_case::Case::Snake);
                 let sanitized_server_name = sanitize_name(snaked_cased_name, &regex, &mut hasher);
-                let custom_tool_client = CustomToolClient::from_config(sanitized_server_name.clone(), server_config);
+                let custom_tool_client =
+                    CustomToolClient::from_config(sanitized_server_name.clone(), orig_name, server_config);
                 (sanitized_server_name, custom_tool_client)
             })
             .collect::<Vec<(String, _)>>();

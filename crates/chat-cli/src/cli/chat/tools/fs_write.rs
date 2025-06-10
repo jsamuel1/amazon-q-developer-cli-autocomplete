@@ -13,6 +13,10 @@ use eyre::{
     bail,
     eyre,
 };
+use globset::{
+    Glob,
+    GlobSetBuilder,
+};
 use serde::Deserialize;
 use similar::DiffableStr;
 use syntect::easy::HighlightLines;
@@ -32,6 +36,11 @@ use super::{
     format_path,
     sanitize_path_tool_arg,
     supports_truecolor,
+};
+use crate::cli::agent::{
+    Agent,
+    PermissionCandidate,
+    PermissionEvalResult,
 };
 use crate::platform::Context;
 
@@ -288,6 +297,88 @@ impl FsWrite {
                 },
             },
             _ => String::new(),
+        }
+    }
+}
+
+impl PermissionCandidate for FsWrite {
+    fn eval(&self, agent: &Agent) -> PermissionEvalResult {
+        #[derive(Debug, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            allowed_paths: Vec<String>,
+            #[serde(default)]
+            denied_paths: Vec<String>,
+        }
+
+        let is_in_allowlist = agent.allowed_tools.contains("fs_write");
+        match agent.tools_settings.get("fs_write") {
+            Some(settings) if is_in_allowlist => {
+                let Settings {
+                    allowed_paths,
+                    denied_paths,
+                } = match serde_json::from_value::<Settings>(settings.clone()) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        error!("Failed to deserialize tool settings for fs_write: {:?}", e);
+                        return PermissionEvalResult::Ask;
+                    },
+                };
+                let allow_set = {
+                    let mut builder = GlobSetBuilder::new();
+                    for path in &allowed_paths {
+                        if let Ok(glob) = Glob::new(path) {
+                            builder.add(glob);
+                        } else {
+                            warn!("Failed to create glob from path given: {path}. Ignoring.");
+                        }
+                    }
+                    builder.build()
+                };
+
+                let deny_set = {
+                    let mut builder = GlobSetBuilder::new();
+                    for path in &denied_paths {
+                        if let Ok(glob) = Glob::new(path) {
+                            builder.add(glob);
+                        } else {
+                            warn!("Failed to create glob from path given: {path}. Ignoring.");
+                        }
+                    }
+                    builder.build()
+                };
+
+                match (allow_set, deny_set) {
+                    (Ok(allow_set), Ok(deny_set)) => {
+                        match self {
+                            Self::Create { path, .. }
+                            | Self::Insert { path, .. }
+                            | Self::Append { path, .. }
+                            | Self::StrReplace { path, .. } => {
+                                if deny_set.is_match(path) {
+                                    return PermissionEvalResult::Deny;
+                                }
+                                if allow_set.is_match(path) {
+                                    return PermissionEvalResult::Allow;
+                                }
+                            },
+                        }
+                        return PermissionEvalResult::Ask;
+                    },
+                    (allow_res, deny_res) => {
+                        if let Err(e) = allow_res {
+                            warn!("fs_write failed to build allow set: {:?}", e);
+                        }
+                        if let Err(e) = deny_res {
+                            warn!("fs_write failed to build deny set: {:?}", e);
+                        }
+                        warn!("One or more detailed args failed to parse, falling back to ask");
+                        return PermissionEvalResult::Ask;
+                    },
+                }
+            },
+            None if is_in_allowlist => PermissionEvalResult::Allow,
+            _ => PermissionEvalResult::Ask,
         }
     }
 }

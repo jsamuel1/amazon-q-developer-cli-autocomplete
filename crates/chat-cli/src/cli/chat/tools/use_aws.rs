@@ -16,13 +16,15 @@ use eyre::{
     WrapErr,
 };
 use serde::Deserialize;
+use tracing::error;
 
 use super::{
     InvokeOutput,
     MAX_TOOL_RESPONSE_SIZE,
     OutputKind,
 };
-use crate::cli::persona::{
+use crate::cli::agent::{
+    Agent,
     PermissionCandidate,
     PermissionEvalResult,
 };
@@ -195,31 +197,39 @@ impl UseAws {
 }
 
 impl PermissionCandidate for UseAws {
-    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
-        use crate::cli::persona::ToolPermission;
+    fn eval(&self, agent: &Agent) -> PermissionEvalResult {
+        #[derive(Debug, Deserialize)]
+        struct Settings {
+            allowed_services: Vec<String>,
+            denied_services: Vec<String>,
+        }
 
-        let Some(perm) = tool_permissions.built_in.get("use_aws") else {
-            if self.requires_acceptance() {
-                return PermissionEvalResult::Ask;
-            } else {
-                return PermissionEvalResult::Allow;
-            }
-        };
-
-        match perm {
-            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
-            ToolPermission::Deny => PermissionEvalResult::Deny,
-            ToolPermission::DetailedList { always_allow, deny } => {
-                // TODO: we need spec out the config some more here
-                // We'll just go with the service names for now
-                let Self { service_name, .. } = self;
-                if deny.contains(service_name) {
+        let Self { service_name, .. } = self;
+        let is_in_allowlist = agent.allowed_tools.contains("use_aws");
+        match agent.tools_settings.get("use_aws") {
+            Some(settings) if is_in_allowlist => {
+                let settings = match serde_json::from_value::<Settings>(settings.clone()) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        error!("Failed to deserialize tool settings for use_aws: {:?}", e);
+                        return PermissionEvalResult::Ask;
+                    },
+                };
+                if settings.denied_services.contains(service_name) {
                     return PermissionEvalResult::Deny;
                 }
-                if always_allow.contains(service_name) {
+                if settings.allowed_services.contains(service_name) {
                     return PermissionEvalResult::Allow;
                 }
                 PermissionEvalResult::Ask
+            },
+            None if is_in_allowlist => PermissionEvalResult::Allow,
+            _ => {
+                if self.requires_acceptance() {
+                    PermissionEvalResult::Ask
+                } else {
+                    PermissionEvalResult::Allow
+                }
             },
         }
     }

@@ -22,6 +22,7 @@ use serde::{
 use syntect::util::LinesWithEndings;
 use tracing::{
     debug,
+    error,
     warn,
 };
 
@@ -32,14 +33,15 @@ use super::{
     format_path,
     sanitize_path_tool_arg,
 };
+use crate::cli::agent::{
+    Agent,
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::cli::chat::util::images::{
     handle_images_from_paths,
     is_supported_image_type,
     pre_process,
-};
-use crate::cli::persona::{
-    PermissionCandidate,
-    PermissionEvalResult,
 };
 use crate::platform::Context;
 
@@ -82,21 +84,38 @@ impl FsRead {
 }
 
 impl PermissionCandidate for FsRead {
-    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
-        use crate::cli::persona::ToolPermission;
+    fn eval(&self, agent: &Agent) -> PermissionEvalResult {
+        #[derive(Debug, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            allowed_paths: Vec<String>,
+            #[serde(default)]
+            denied_paths: Vec<String>,
+            #[serde(default = "default_allow_read_only")]
+            allow_read_only: bool,
+        }
 
-        let Some(perm) = tool_permissions.built_in.get("fs_read") else {
-            // By default, we always allow read only operations.
-            return PermissionEvalResult::Allow;
-        };
+        fn default_allow_read_only() -> bool {
+            true
+        }
 
-        match perm {
-            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
-            ToolPermission::Deny => PermissionEvalResult::Deny,
-            ToolPermission::DetailedList { always_allow, deny } => {
+        let is_in_allowlist = agent.allowed_tools.contains("fs_read");
+        match agent.tools_settings.get("fs_read") {
+            Some(settings) if is_in_allowlist => {
+                let Settings {
+                    allowed_paths,
+                    denied_paths,
+                    allow_read_only,
+                } = match serde_json::from_value::<Settings>(settings.clone()) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        error!("Failed to deserialize tool settings for fs_read: {:?}", e);
+                        return PermissionEvalResult::Ask;
+                    },
+                };
                 let allow_set = {
                     let mut builder = GlobSetBuilder::new();
-                    for path in always_allow {
+                    for path in &allowed_paths {
                         if let Ok(glob) = Glob::new(path) {
                             builder.add(glob);
                         } else {
@@ -108,7 +127,7 @@ impl PermissionCandidate for FsRead {
 
                 let deny_set = {
                     let mut builder = GlobSetBuilder::new();
-                    for path in deny {
+                    for path in &denied_paths {
                         if let Ok(glob) = Glob::new(path) {
                             builder.add(glob);
                         } else {
@@ -141,11 +160,11 @@ impl PermissionCandidate for FsRead {
                                 }
                             },
                         }
-                        // By default, fs_read are allowed / trusted since all of operations are
-                        // read only. But if the users go through the trouble of specifying an
-                        // allow or deny list, we are going to assume they no longer want to trust
-                        // every read only.
-                        PermissionEvalResult::Ask
+                        return if allow_read_only {
+                            PermissionEvalResult::Allow
+                        } else {
+                            PermissionEvalResult::Ask
+                        };
                     },
                     (allow_res, deny_res) => {
                         if let Err(e) = allow_res {
@@ -155,10 +174,12 @@ impl PermissionCandidate for FsRead {
                             warn!("fs_read failed to build deny set: {:?}", e);
                         }
                         warn!("One or more detailed args failed to parse, falling back to ask");
-                        PermissionEvalResult::Ask
+                        return PermissionEvalResult::Ask;
                     },
                 }
             },
+            None if is_in_allowlist => PermissionEvalResult::Allow,
+            _ => PermissionEvalResult::Ask,
         }
     }
 }

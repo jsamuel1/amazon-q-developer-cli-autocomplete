@@ -26,13 +26,14 @@ use super::{
     MAX_TOOL_RESPONSE_SIZE,
     OutputKind,
 };
+use crate::cli::agent::{
+    Agent,
+    PermissionCandidate,
+    PermissionEvalResult,
+};
 use crate::cli::chat::{
     CONTINUATION_LINE,
     PURPOSE_ARROW,
-};
-use crate::cli::persona::{
-    PermissionCandidate,
-    PermissionEvalResult,
 };
 use crate::platform::Context;
 const READONLY_COMMANDS: &[&str] = &["ls", "cat", "echo", "pwd", "which", "head", "tail", "find", "grep"];
@@ -44,12 +45,14 @@ pub struct ExecuteBash {
 }
 
 impl ExecuteBash {
-    pub fn requires_acceptance(&self) -> bool {
+    pub fn requires_acceptance(&self, allowed_commands: Option<&Vec<String>>, allow_read_only: bool) -> bool {
+        let default_arr = vec![];
+        let allowed_commands = allowed_commands.unwrap_or(&default_arr);
         let Some(args) = shlex::split(&self.command) else {
             return true;
         };
-
         const DANGEROUS_PATTERNS: &[&str] = &["<(", "$(", "`", ">", "&&", "||", "&", ";"];
+
         if args
             .iter()
             .any(|arg| DANGEROUS_PATTERNS.iter().any(|p| arg.contains(p)))
@@ -92,9 +95,16 @@ impl ExecuteBash {
                 {
                     return true;
                 },
-                Some(cmd) if !READONLY_COMMANDS.contains(&cmd.as_str()) => return true,
+                Some(cmd) => {
+                    if allowed_commands.contains(cmd) {
+                        continue;
+                    }
+                    let is_cmd_read_only = READONLY_COMMANDS.contains(&cmd.as_str());
+                    if !allow_read_only || !is_cmd_read_only {
+                        return true;
+                    }
+                },
                 None => return true,
-                _ => (),
             }
         }
 
@@ -157,29 +167,54 @@ impl ExecuteBash {
 }
 
 impl PermissionCandidate for ExecuteBash {
-    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
-        use crate::cli::persona::ToolPermission;
+    fn eval(&self, agent: &Agent) -> PermissionEvalResult {
+        #[derive(Debug, Deserialize)]
+        struct Settings {
+            #[serde(default)]
+            allowed_commands: Vec<String>,
+            #[serde(default)]
+            denied_commands: Vec<String>,
+            #[serde(default = "default_allow_read_only")]
+            allow_read_only: bool,
+        }
+
+        fn default_allow_read_only() -> bool {
+            true
+        }
 
         let Self { command, .. } = self;
-        let Some(perm) = tool_permissions.built_in.get("execute_bash") else {
-            if self.requires_acceptance() {
-                return PermissionEvalResult::Ask;
-            } else {
-                return PermissionEvalResult::Allow;
-            }
-        };
+        let is_in_allowlist = agent.allowed_tools.contains("execute_bash");
+        match agent.tools_settings.get("execute_bash") {
+            Some(settings) if is_in_allowlist => {
+                let Settings {
+                    allowed_commands,
+                    denied_commands,
+                    allow_read_only,
+                } = match serde_json::from_value::<Settings>(settings.clone()) {
+                    Ok(settings) => settings,
+                    Err(e) => {
+                        error!("Failed to deserialize tool settings for execute_bash: {:?}", e);
+                        return PermissionEvalResult::Ask;
+                    },
+                };
 
-        match perm {
-            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
-            ToolPermission::Deny => PermissionEvalResult::Deny,
-            ToolPermission::DetailedList { always_allow, deny } => {
-                if deny.iter().any(|c| command.contains(c)) {
+                if denied_commands.iter().any(|dc| command.contains(dc)) {
                     return PermissionEvalResult::Deny;
                 }
-                if always_allow.iter().any(|c| command.contains(c)) {
-                    return PermissionEvalResult::Allow;
+
+                if self.requires_acceptance(Some(&allowed_commands), allow_read_only) {
+                    PermissionEvalResult::Ask
+                } else {
+                    PermissionEvalResult::Allow
                 }
-                PermissionEvalResult::Ask
+            },
+            None if is_in_allowlist => PermissionEvalResult::Allow,
+            _ => {
+                if self.requires_acceptance(None, default_allow_read_only()) {
+                    PermissionEvalResult::Ask
+                } else {
+                    PermissionEvalResult::Allow
+                }
             },
         }
     }
@@ -418,7 +453,7 @@ mod tests {
             }))
             .unwrap();
             assert_eq!(
-                tool.requires_acceptance(),
+                tool.requires_acceptance(None, true),
                 *expected,
                 "expected command: `{}` to have requires_acceptance: `{}`",
                 cmd,

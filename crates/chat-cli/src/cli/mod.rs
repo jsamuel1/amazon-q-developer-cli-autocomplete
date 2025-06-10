@@ -1,10 +1,10 @@
+mod agent;
 mod chat;
 mod debug;
 mod diagnostics;
 mod feed;
 mod issue;
 mod mcp;
-mod persona;
 mod settings;
 mod user;
 

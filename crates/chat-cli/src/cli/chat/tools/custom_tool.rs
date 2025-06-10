@@ -16,12 +16,13 @@ use tokio::sync::RwLock;
 use tracing::warn;
 
 use super::InvokeOutput;
-use crate::cli::chat::CONTINUATION_LINE;
-use crate::cli::chat::token_counter::TokenCounter;
-use crate::cli::persona::{
+use crate::cli::agent::{
+    Agent,
     PermissionCandidate,
     PermissionEvalResult,
 };
+use crate::cli::chat::CONTINUATION_LINE;
+use crate::cli::chat::token_counter::TokenCounter;
 use crate::mcp_client::{
     Client as McpClient,
     ClientConfig as McpClientConfig,
@@ -55,7 +56,11 @@ pub fn default_timeout() -> u64 {
 #[derive(Debug)]
 pub enum CustomToolClient {
     Stdio {
+        /// This is the server name as recognized by the model (post sanitized)
         server_name: String,
+        /// This is the server name as recognized by the user who configured it. This is needed
+        /// for when we check the tool permission against the agent config.
+        orig_name: String,
         client: McpClient<StdioTransport>,
         server_capabilities: RwLock<Option<ServerCapabilities>>,
     },
@@ -63,7 +68,7 @@ pub enum CustomToolClient {
 
 impl CustomToolClient {
     // TODO: add support for http transport
-    pub fn from_config(server_name: String, config: CustomToolConfig) -> Result<Self> {
+    pub fn from_config(server_name: String, orig_name: String, config: CustomToolConfig) -> Result<Self> {
         let CustomToolConfig {
             command,
             args,
@@ -84,6 +89,7 @@ impl CustomToolClient {
         let client = McpClient::<JsonRpcStdioTransport>::from_config(mcp_client_config)?;
         Ok(CustomToolClient::Stdio {
             server_name,
+            orig_name,
             client,
             server_capabilities: RwLock::new(None),
         })
@@ -121,6 +127,12 @@ impl CustomToolClient {
     pub fn get_server_name(&self) -> &str {
         match self {
             CustomToolClient::Stdio { server_name, .. } => server_name.as_str(),
+        }
+    }
+
+    pub fn get_orig_name(&self) -> &str {
+        match self {
+            CustomToolClient::Stdio { orig_name, .. } => orig_name.as_str(),
         }
     }
 
@@ -246,32 +258,21 @@ impl CustomTool {
 }
 
 impl PermissionCandidate for CustomTool {
-    fn eval(&self, tool_permissions: &crate::cli::persona::ToolPermissions) -> PermissionEvalResult {
-        use crate::cli::persona::ToolPermission;
-
+    fn eval(&self, agent: &Agent) -> PermissionEvalResult {
         let Self {
             name: tool_name,
             client,
             ..
         } = self;
-        let server_name = client.get_server_name();
-        let Some(perm) = tool_permissions.built_in.get(server_name) else {
-            // This really should not happen
-            return PermissionEvalResult::Allow;
-        };
+        let orig_name = client.get_orig_name();
+        let orig_server_name = format!("@{orig_name}");
 
-        match perm {
-            ToolPermission::AlwaysAllow => PermissionEvalResult::Allow,
-            ToolPermission::Deny => PermissionEvalResult::Deny,
-            ToolPermission::DetailedList { always_allow, deny } => {
-                if deny.contains(tool_name) {
-                    return PermissionEvalResult::Deny;
-                }
-                if always_allow.contains(tool_name) {
-                    return PermissionEvalResult::Allow;
-                }
-                PermissionEvalResult::Ask
-            },
+        if agent.allowed_tools.contains(orig_server_name.as_str())
+            || agent.allowed_tools.contains(&format!("@{orig_name}/{tool_name}"))
+        {
+            PermissionEvalResult::Allow
+        } else {
+            PermissionEvalResult::Ask
         }
     }
 }
