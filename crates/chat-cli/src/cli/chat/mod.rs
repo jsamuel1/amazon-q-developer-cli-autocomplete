@@ -109,7 +109,6 @@ use tokio::signal::ctrl_c;
 use tool_manager::{
     GetPromptError,
     LoadingRecord,
-    McpServerConfig,
     PromptBundle,
     ToolManager,
     ToolManagerBuilder,
@@ -147,6 +146,7 @@ use uuid::Uuid;
 use winnow::Partial;
 use winnow::stream::Offset;
 
+use super::agent::PermissionEvalResult;
 use crate::api_client::StreamingClient;
 use crate::api_client::clients::SendMessageOutput;
 use crate::api_client::model::{
@@ -154,6 +154,7 @@ use crate::api_client::model::{
     Tool as FigTool,
     ToolResultStatus,
 };
+use crate::cli::agent::AgentCollection;
 use crate::database::Database;
 use crate::database::settings::Setting;
 use crate::mcp_client::{
@@ -230,25 +231,6 @@ impl ChatArgs {
             _ => StreamingClient::new(database).await?,
         };
 
-        let mcp_server_configs = match McpServerConfig::load_config(&mut output).await {
-            Ok(config) => {
-                if interactive && !database.settings.get_bool(Setting::McpLoadedBefore).unwrap_or(false) {
-                    execute!(
-                        output,
-                        style::Print(
-                            "To learn more about MCP safety, see https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-mcp-security.html\n\n"
-                        )
-                    )?;
-                }
-                database.settings.set(Setting::McpLoadedBefore, true).await?;
-                config
-            },
-            Err(e) => {
-                warn!("No mcp server config loaded: {}", e);
-                McpServerConfig::default()
-            },
-        };
-
         // If profile is specified, verify it exists before starting the chat
         if let Some(ref profile_name) = self.profile {
             // Create a temporary context manager to check if the profile exists
@@ -279,11 +261,36 @@ impl ChatArgs {
         } else {
             Box::new(NullWriter {})
         };
+        let agents = {
+            let mut agents = AgentCollection::load(&mut output).await;
+            error!("## agent: {:?}", agents);
+            if let Some(name) = self.profile.as_ref() {
+                match agents.switch(name) {
+                    Ok(agent) if !agent.mcp_servers.mcp_servers.is_empty() => {
+                        if interactive && !database.settings.get_bool(Setting::McpLoadedBefore).unwrap_or(false) {
+                            execute!(
+                                output,
+                                style::Print(
+                                    "To learn more about MCP safety, see https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-mcp-security.html\n\n"
+                                )
+                            )?;
+                        }
+                        database.settings.set(Setting::McpLoadedBefore, true).await?;
+                    },
+                    Err(e) => {
+                        let _ = execute!(output, style::Print(format!("Error switching profile: {}", e)));
+                    },
+                    _ => {},
+                }
+            }
+            agents
+        };
+
         let mut tool_manager = ToolManagerBuilder::default()
-            .mcp_server_config(mcp_server_configs)
             .prompt_list_sender(prompt_response_sender)
             .prompt_list_receiver(prompt_request_receiver)
             .conversation_id(&conversation_id)
+            .agent(agents.get_active().cloned().unwrap_or_default())
             .interactive(interactive)
             .build(telemetry, tool_manager_output)
             .await?;
@@ -543,7 +550,7 @@ impl ChatContext {
         ctx: Arc<Context>,
         database: &mut Database,
         conversation_id: &str,
-        output: SharedWriter,
+        mut output: SharedWriter,
         mut input: Option<String>,
         input_source: InputSource,
         interactive: bool,
@@ -3046,10 +3053,30 @@ impl ChatContext {
                 continue;
             }
 
-            // If there is an override, we will use it. Otherwise fall back to Tool's default.
-            let allowed = self.tool_permissions.trust_all
-                || (self.tool_permissions.has(&tool.name) && self.tool_permissions.is_trusted(&tool.name))
-                || !tool.tool.requires_acceptance(&self.ctx);
+            let mut denied = false;
+            let allowed =
+                self.conversation_state
+                    .agents
+                    .get_active()
+                    .is_some_and(|a| match tool.tool.requires_acceptance(a) {
+                        PermissionEvalResult::Allow => true,
+                        PermissionEvalResult::Ask => false,
+                        PermissionEvalResult::Deny => {
+                            denied = true;
+                            false
+                        },
+                    });
+
+            if denied {
+                return Ok(ChatState::HandleInput {
+                    input: format!(
+                        "Tool use with {} was rejected because the arguments supplied were forbidden",
+                        tool.name
+                    ),
+                    tool_uses: Some(tool_uses),
+                    pending_tool_index: Some(index),
+                });
+            }
 
             if database
                 .settings

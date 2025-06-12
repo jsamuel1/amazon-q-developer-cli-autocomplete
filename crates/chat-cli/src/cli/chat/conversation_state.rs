@@ -3,6 +3,7 @@ use std::collections::{
     HashSet,
     VecDeque,
 };
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -69,6 +70,7 @@ use crate::api_client::model::{
     UserInputMessage,
     UserInputMessageContext,
 };
+use crate::cli::agent::AgentCollection;
 use crate::cli::chat::util::shared_writer::SharedWriter;
 use crate::database::Database;
 use crate::mcp_client::Prompt;
@@ -105,6 +107,8 @@ pub struct ConversationState {
     latest_summary: Option<String>,
     #[serde(skip)]
     pub updates: Option<SharedWriter>,
+    #[serde(skip)]
+    pub agents: AgentCollection,
 }
 
 impl ConversationState {
@@ -116,7 +120,6 @@ impl ConversationState {
         updates: Option<SharedWriter>,
         tool_manager: ToolManager,
     ) -> Self {
-        // Initialize context manager
         let context_manager = match ContextManager::new(ctx, None).await {
             Ok(mut manager) => {
                 // Switch to specified profile if provided
@@ -132,6 +135,8 @@ impl ConversationState {
                 None
             },
         };
+
+        let agents = AgentCollection::default();
 
         Self {
             conversation_id: conversation_id.to_string(),
@@ -157,6 +162,7 @@ impl ConversationState {
             context_message_length: None,
             latest_summary: None,
             updates,
+            agents,
         }
     }
 
